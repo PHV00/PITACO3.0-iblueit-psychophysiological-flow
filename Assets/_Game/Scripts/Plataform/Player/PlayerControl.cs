@@ -6,6 +6,7 @@ using Ibit.Plataform.Camera;
 using UnityEngine;
 using Ibit.Core.Game;
 using Ibit.Core.Oximetry;
+using Ibit.Core.Oximetry.Integration;
 using System.Globalization;
 
 namespace Ibit.Plataform
@@ -252,6 +253,11 @@ namespace Ibit.Plataform
                 
                     sensorValueOxiHR = Parsers.Float(auxValuesOxi[0]);
                     sensorValueOxiSPO = Parsers.Float(auxValuesOxi[1]);
+                    // Preserve the legacy parser and its O;10 sample cadence,
+                    // but publish the accepted pair to the source-aware bridge.
+                    if (OximetryDataBridge.Active != null)
+                        OximetryDataBridge.Active.RecordLegacy(
+                            sensorValueOxiHR, sensorValueOxiSPO);
                 
                     // Legacy data remain available to the current Mixer;
                     // when 2.4 is connected it owns only the visual fields.
