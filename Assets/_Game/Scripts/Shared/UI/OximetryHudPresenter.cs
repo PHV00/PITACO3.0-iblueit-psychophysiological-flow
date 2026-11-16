@@ -1,5 +1,6 @@
 using System.Globalization;
 using Ibit.Core.Oximetry;
+using Ibit.Core.Oximetry.Integration;
 using Ibit.Core.Oximetry.Placement;
 using Ibit.Core.Serial;
 using UnityEngine;
@@ -11,7 +12,8 @@ namespace Ibit.Core.Oximetry.UI
     /// Shared text presenter for the existing StatusDevices/measures UI.
     /// Reads measurement/placement state, but never changes the G1 policy,
     /// PPG buffer, serial connection or the finger-placement pause.
-    /// Scene-specific OximeterMeasures scripts adapt their legacy Player only.
+    /// PITACO 2.4 values come from the same snapshot consumed by the Mixer;
+    /// scene-specific OximeterMeasures scripts retain the legacy Player path.
     /// </summary>
     [RequireComponent(typeof(Text))]
     public abstract class OximetryHudPresenter : MonoBehaviour
@@ -23,8 +25,8 @@ namespace Ibit.Core.Oximetry.UI
         private SerialControllerPitaco24 serial;
         private FingerPlacementMonitor placement;
 
-        // Retain current scene Player semantics; no second publication clock.
-        // Numeric values are already refreshed every 1 s by the Player.
+        // Existing Player path remains authoritative for the separate legacy
+        // oximeter only. PITACO 2.4 reads the Bridge snapshot directly.
         protected abstract string ReadPlayerText(bool pitaco24Connected);
 
         protected virtual void Update()
@@ -83,8 +85,24 @@ namespace Ibit.Core.Oximetry.UI
                 return;
             }
 
-            string playerText = ReadPlayerText(true);
-            SetText(playerText ?? ConnectedPrefix + "PPG: aguardando Player");
+            // Consume the same source-aware, quality-gated values as MixerManager.
+            // Do not bypass Bridge freshness/G1 rules with Player's cached fields.
+            var bridge = OximetryDataBridge.Active;
+            if (bridge == null)
+            {
+                SetText(ConnectedPrefix + "PPG: integracao indisponivel");
+                return;
+            }
+
+            OximetrySnapshot snapshot = bridge.GetSnapshot();
+            if (snapshot.Source != OximetrySource.Pitaco24)
+            {
+                SetText(ConnectedPrefix + "PPG: fonte PITACO 2.4 indisponivel");
+                return;
+            }
+
+            // Missing or expired channels must show '--', never stale values.
+            SetText(FormatPitaco24Values(snapshot.Bpm, snapshot.SpO2Percent));
         }
 
         private void SetText(string value)
