@@ -140,11 +140,17 @@ namespace Ibit.Core.Oximetry.Integration
         private double lastLegacyBpm;
         private double lastLegacySpo2;
 
-        // Can be enabled on the persistent "Pitaco Connection Manager" in
-        // PlayMode to capture integration evidence without logging every frame.
-        [SerializeField] private bool logDiagnostics;
+        // Enabled by default for the integration test: no Inspector setup needed.
+        // Rate-limited so PPG samples (~25 Hz) do not flood the Unity Console.
+        [SerializeField] private bool logDiagnostics = true;
         [SerializeField] private float logIntervalSeconds = 5f;
         private float nextDiagnosticAt;
+
+        // A Bridge snapshot alone does NOT prove that the Mixer consumed it.
+        // MixerManager acknowledges only after its fusion/adaptation calls finish.
+        private float lastMixerConsumptionAt = -1f;
+        private int mixerConsumptionCount;
+        private OximetrySnapshot lastMixerConsumed;
 
         private void Awake()
         {
@@ -170,12 +176,37 @@ namespace Ibit.Core.Oximetry.Integration
             nextDiagnosticAt = Time.unscaledTime +
                 Mathf.Max(1f, logIntervalSeconds);
             OximetrySnapshot state = GetSnapshot();
+            bool mixerRecent = lastMixerConsumptionAt >= 0f &&
+                Time.unscaledTime - lastMixerConsumptionAt <= 2f;
+
             Debug.Log("[OximetryBridge->Mixer] source=" + state.Source +
-                " | bpm=" + (state.HasBpm ? state.Bpm.Value.ToString("F1") : "--") +
-                " | spo2=" + (state.HasSpO2 ? state.SpO2Percent.Value.ToString("F1") : "--") +
+                " | bpm=" + FormatReading(state.Bpm) +
+                " | spo2=" + FormatReading(state.SpO2Percent) +
                 " | demo=" + state.SpO2IsDemonstration +
+                " | contato=" + state.OpticalContactConfirmed +
+                " | G1=" + state.BasicSignalQualityApproved +
                 " | legacyRules=" + state.EligibleForLegacySpo2Rules +
-                " | age=" + state.AgeSeconds.ToString("F1") + "s");
+                " | age=" + state.AgeSeconds.ToString("F1") + "s" +
+                " | mixer=" + (mixerRecent ? "RECEBIDO" : "AGUARDANDO") +
+                " | mixerReads=" + mixerConsumptionCount +
+                " | mixerSource=" + (mixerRecent ? lastMixerConsumed.Source.ToString() : "--") +
+                " | mixerBpm=" + (mixerRecent ? FormatReading(lastMixerConsumed.Bpm) : "--") +
+                " | mixerSpo2=" + (mixerRecent ? FormatReading(lastMixerConsumed.SpO2Percent) : "--"));
+        }
+
+        private static string FormatReading(double? value)
+        {
+            return value.HasValue ? value.Value.ToString("F1") : "--";
+        }
+
+        // Called by MixerManager only AFTER FusionManager and AdaptationGrid
+        // execute. This is an integration acknowledgement, not an ONNX input.
+        public void RecordMixerConsumption(OximetrySnapshot consumed)
+        {
+            lastMixerConsumed = consumed;
+            lastMixerConsumptionAt = Time.unscaledTime;
+            if (mixerConsumptionCount < int.MaxValue)
+                mixerConsumptionCount++;
         }
 
         private void AttachPpg()
@@ -257,6 +288,8 @@ namespace Ibit.Core.Oximetry.Integration
                 ppg.OnMeasurement -= OnPpgMeasurement;
             lastPublished = null;
             lastPitacoPublicationAt = -1f;
+            lastMixerConsumptionAt = -1f;
+            mixerConsumptionCount = 0;
             if (Active == this) Active = null;
         }
     }
