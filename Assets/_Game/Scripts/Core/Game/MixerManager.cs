@@ -9,6 +9,7 @@ using Ibit.Plataform;
 using UnityEngine;
 using UnityEngine.UI;
 using Ibit.Core.Serial;
+using Ibit.Core.Oximetry.Integration;
 //using MixerFusion;
 
 namespace Ibit.Core.Game
@@ -21,6 +22,9 @@ namespace Ibit.Core.Game
         private SerialControllerMano scm;
         private SerialControllerCinta scc;
         private SerialControllerOximetro sco;
+        private OximetryDataBridge oximetryBridge;
+        // Inspectable contract. No new ML observations are introduced.
+        public OximetrySnapshot CurrentOximetry { get; private set; }
 
         void Start()
         {
@@ -35,7 +39,8 @@ namespace Ibit.Core.Game
             
             if (sco == null)
                 sco = FindObjectOfType<SerialControllerOximetro>();
-        
+            oximetryBridge = OximetryDataBridge.Active;
+
             // DeepDDA: evento
             DeepDDAManager.OnDifficultyAdjustmentSpeed += SpeedAdjustment;
             CurrentParameters = ParametersDb.parameters;
@@ -47,8 +52,25 @@ namespace Ibit.Core.Game
 
             if (scp.IsConnected || scm.IsConnected || scc.IsConnected) // Só executa caso algum dispositivo de controle esteja conectado
             {
-                FusionManager(Player.sensorValuePitaco, Player.sensorValueMano, Player.sensorValueCinta, Player.sensorValueOxiSPO, Player.sensorValueOxiHR);
-                AdaptationGrid(Player.sensorValuePitaco, Player.sensorValueMano, Player.sensorValueCinta, Player.sensorValueOxiSPO, Player.sensorValueOxiHR);
+                // Consume final computed readings, never RED/IR or a second COM.
+                // Existing DeepDDA ONNX, observations, actions and rewards
+                // remain unchanged.
+                if (oximetryBridge == null)
+                    oximetryBridge = OximetryDataBridge.Active;
+                CurrentOximetry = oximetryBridge != null
+                    ? oximetryBridge.GetSnapshot()
+                    : OximetrySnapshotFactory.FromLegacy(
+                        sco != null && sco.IsConnected,
+                        Player.sensorValueOxiHR, Player.sensorValueOxiSPO, 0f);
+
+                FusionManager(Player.sensorValuePitaco, Player.sensorValueMano,
+                    Player.sensorValueCinta,
+                    CurrentOximetry.HasSpO2
+                        ? (float)CurrentOximetry.SpO2Percent.Value : 0f,
+                    CurrentOximetry.HasBpm
+                        ? (float)CurrentOximetry.Bpm.Value : 0f);
+                AdaptationGrid(Player.sensorValuePitaco, Player.sensorValueMano,
+                    Player.sensorValueCinta, CurrentOximetry);
                 
                 // Debug.Log($"Pitaco: {Player.sensorValuePitaco}");
                 // Debug.Log($"Mano: {Player.sensorValueMano}");
