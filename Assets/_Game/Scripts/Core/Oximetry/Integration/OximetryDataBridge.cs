@@ -132,6 +132,12 @@ namespace Ibit.Core.Oximetry.Integration
         private double lastLegacyBpm;
         private double lastLegacySpo2;
 
+        // Can be enabled on the persistent "Pitaco Connection Manager" in
+        // PlayMode to capture integration evidence without logging every frame.
+        [SerializeField] private bool logDiagnostics;
+        [SerializeField] private float logIntervalSeconds = 5f;
+        private float nextDiagnosticAt;
+
         private void Awake()
         {
             if (Active != null && Active != this)
@@ -144,8 +150,24 @@ namespace Ibit.Core.Oximetry.Integration
 
         private void OnEnable()
         {
-            if (Active != this) return;
+            if (Active != null && Active != this) return;
+            Active = this;
             AttachPpg();
+        }
+
+        private void Update()
+        {
+            if (!logDiagnostics || Time.unscaledTime < nextDiagnosticAt)
+                return;
+            nextDiagnosticAt = Time.unscaledTime +
+                Mathf.Max(1f, logIntervalSeconds);
+            OximetrySnapshot state = GetSnapshot();
+            Debug.Log("[OximetryBridge->Mixer] source=" + state.Source +
+                " | bpm=" + (state.HasBpm ? state.Bpm.Value.ToString("F1") : "--") +
+                " | spo2=" + (state.HasSpO2 ? state.SpO2Percent.Value.ToString("F1") : "--") +
+                " | demo=" + state.SpO2IsDemonstration +
+                " | legacyRules=" + state.EligibleForLegacySpo2Rules +
+                " | age=" + state.AgeSeconds.ToString("F1") + "s");
         }
 
         private void AttachPpg()
