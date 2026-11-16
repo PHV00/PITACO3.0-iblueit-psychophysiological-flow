@@ -21,8 +21,13 @@ ou mudança no comportamento da rede neural neste marco.
   após o parser e a cadência original `O;10`; os campos globais
   `sensorValueOxiHR` e `sensorValueOxiSPO` continuam pertencendo ao legado.
 - `MixerManager.CurrentOximetry` recebe um `OximetrySnapshot` com os
-  números, a fonte, a validade, a idade e a elegibilidade para as regras
-  legadas de saturação.
+  números, a fonte, a validade e a idade. Quando os dois dispositivos estão
+  conectados, este snapshot principal prioriza a oximetria do PITACO 2.4.
+- `MixerManager.CurrentLegacyRulesOximetry` usa
+  `OximetryDataBridge.GetLegacyRulesSnapshot()`: mantém a fonte do oxímetro
+  antigo para os painéis e recompensas de saturação enquanto ele estiver
+  conectado e com dados recentes. Isso impede que a conexão simultânea do
+  PITACO 2.4 desative inadvertidamente os mecanismos legados.
 - `MixerAdaptationGrid` continua com os mesmos limiares, pausas, painéis
   e recompensas; passou a exigir o indicador `EligibleForLegacySpo2Rules`
   em vez de depender apenas de `sco.IsConnected`.
@@ -37,7 +42,8 @@ PITACO 2.4 -> PitacoConnectionManager (USB única)
   -> SerialControllerPitaco24.OnJsonReceived
   -> PpgProcessingCoordinator (contato/G1/PPG 8s/BPM/SpO2 DEMO)
   -> OximetryDataBridge.GetSnapshot()
-  -> MixerManager.CurrentOximetry
+  -> MixerManager.CurrentOximetry (números finais, independente do ONNX)
+  -> MixerManager.CurrentLegacyRulesOximetry
   -> MixerAdaptationGrid (regra legada apenas quando elegível)
 
 Oxímetro externo -> SerialControllerOximetro
@@ -72,10 +78,13 @@ esse contrato como true. Não fazer isso apenas para liberar alertas.
 | PITACO 2.4 com 1-2 falhas transientes, G1 expirado, reset ou falha de contato | Valores indisponíveis | Bloqueadas |
 | PITACO 2.4 com BPM, mas sem SpO2 (lacuna reconstruída) | Só BPM | Bloqueadas |
 | Oxímetro legado recente e conectado (sem 2.4 ativo) | HR+SpO2 | Preservadas |
+| Ambos conectados, PITACO 2.4 DEMO e oxímetro legado recente | Snapshot principal: PITACO 2.4; snapshot das regras: legado | Preservadas usando apenas SpO2 legada |
 | Sem sensor, desconectado ou valor expirado | Valores indisponíveis | Bloqueadas |
 
-Com o 2.4 conectado, sua fonte tem prioridade e não se usa silenciosamente
-um valor velho do oxímetro legado. Dados ausentes são `null`, nunca um
+Com o 2.4 conectado, sua fonte tem prioridade no snapshot principal e não
+se usa silenciosamente um valor velho do oxímetro legado. O snapshot separado
+de regras utiliza o oxímetro legado somente enquanto conectado e recente.
+Dados ausentes são `null`, nunca um
 zero entendido como BPM fisiológico. O `FusionManager` recebe zero
 apenas como fallback de compatibilidade antiga; ele atualmente não usa
 HR/SpO2 na lógica de fusão.
@@ -94,6 +103,7 @@ Limites temporais iniciais de engenharia: publicação 2.4 por até **2 s**;
 - Rodar PlayMode com e sem hardware: 2.4 sozinho, legado sozinho, ambos
   conectados, retirada do dedo, perda USB e recuperação.
 - Registrar `CurrentOximetry.Source`, `HasBpm`, `HasSpO2`,
+  `CurrentLegacyRulesOximetry.Source`,
   `EligibleForLegacySpo2Rules`, decisões do agente e resultados de G1.
 - Confirmar que ONNX, 16 observações, ações, YAML, e política de inferência
   não foram alterados. Verificar os painéis legados em equipamento
