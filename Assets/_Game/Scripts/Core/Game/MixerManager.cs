@@ -25,6 +25,7 @@ namespace Ibit.Core.Game
         private OximetryDataBridge oximetryBridge;
         // Inspectable contract. No new ML observations are introduced.
         public OximetrySnapshot CurrentOximetry { get; private set; }
+        public OximetrySnapshot CurrentLegacyRulesOximetry { get; private set; }
 
         void Start()
         {
@@ -63,6 +64,13 @@ namespace Ibit.Core.Game
                         sco != null && sco.IsConnected,
                         Player.sensorValueOxiHR, Player.sensorValueOxiSPO, 0f);
 
+                // Preserve the standalone oximeter's historical saturation
+                // rules if both devices are present; otherwise the same
+                // PITACO snapshot is eligible only if independently calibrated.
+                CurrentLegacyRulesOximetry = oximetryBridge != null
+                    ? oximetryBridge.GetLegacyRulesSnapshot()
+                    : CurrentOximetry;
+
                 FusionManager(Player.sensorValuePitaco, Player.sensorValueMano,
                     Player.sensorValueCinta,
                     CurrentOximetry.HasSpO2
@@ -70,7 +78,7 @@ namespace Ibit.Core.Game
                     CurrentOximetry.HasBpm
                         ? (float)CurrentOximetry.Bpm.Value : 0f);
                 AdaptationGrid(Player.sensorValuePitaco, Player.sensorValueMano,
-                    Player.sensorValueCinta, CurrentOximetry);
+                    Player.sensorValueCinta, CurrentLegacyRulesOximetry);
                 
                 // Debug.Log($"Pitaco: {Player.sensorValuePitaco}");
                 // Debug.Log($"Mano: {Player.sensorValueMano}");
