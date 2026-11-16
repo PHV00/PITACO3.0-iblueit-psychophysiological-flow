@@ -93,6 +93,34 @@ Limites temporais iniciais de engenharia: publicação 2.4 por até **2 s**;
 última leitura legada por até **15 s** (cadência O;10). Comparar contra
 `Time.unscaledTime` para não manter dados antigos durante pausa do jogo.
 
+## Evidência automática no Console do Unity
+
+O `OximetryDataBridge` agora registra, **por padrão e a cada 5 segundos**
+(configurável em `logIntervalSeconds`), a linha:
+
+```text
+[OximetryBridge->Mixer] source=Pitaco24 | bpm=59,1 | spo2=90,5 | demo=True | contato=True | G1=True | legacyRules=False | age=0,2s | mixer=RECEBIDO | mixerReads=240 | mixerSource=Pitaco24 | mixerBpm=59,1 | mixerSpo2=90,5
+```
+
+Exemplo ilustrativo, **não é um log real do hardware**. O separador decimal
+varia conforme a configuração regional do Unity.
+
+- `source`, `bpm`, `spo2`, `contato` e `G1` descrevem o snapshot
+  disponível no Bridge; `--` significa valor indisponível.
+- `mixer=RECEBIDO` somente quando `MixerManager` chamou
+  `RecordMixerConsumption` **após** `FusionManager` e `AdaptationGrid`
+  retornarem, nos últimos 2 segundos. `mixer=AGUARDANDO` significa
+  que esse consumo recente não foi confirmado.
+- `mixerReads` contabiliza as confirmações durante a execução e
+  `mixerBpm`/`mixerSpo2` mostram o último snapshot consumido.
+- O campo `demo=True` e `legacyRules=False` preserva o bloqueio da SpO2
+  demonstrativa para os painéis antigos.
+- Este log **não prova que o ONNX recebeu BPM/SpO2 como observações**:
+  o modelo mantém as 16 observações originais e não foi retreinado.
+
+O registro pode ser silenciado em `logDiagnostics=false` no Inspector,
+e a frequência pode ser ajustada sem alterar a aquisição PPG.
+
 ## Testes e evidências
 
 - `OximetryDataBridgeTests`: número final, estado de contato, G1,
