@@ -17,9 +17,13 @@ namespace Ibit.Core.Oximetry
         public readonly double? RatioOfRatios;
         public readonly double Autocorrelation;
         public readonly string Status;
+        // Reserved for a future independently calibrated and validated SpO2
+        // estimator. The current TryEstimateDemo() always leaves this false.
+        public readonly bool SpO2CalibratedForLegacyRules;
 
         public PpgMeasurement(uint timeMs, double samplingHz, double? bpm,
-            double? spo2Demo, double? ratio, double autocorrelation, string status)
+            double? spo2Demo, double? ratio, double autocorrelation,
+            string status, bool spO2CalibratedForLegacyRules = false)
         {
             DeviceTimeMs = timeMs;
             SamplingHz = samplingHz;
@@ -28,6 +32,7 @@ namespace Ibit.Core.Oximetry
             RatioOfRatios = ratio;
             Autocorrelation = autocorrelation;
             Status = status;
+            SpO2CalibratedForLegacyRules = spO2CalibratedForLegacyRules;
         }
     }
 

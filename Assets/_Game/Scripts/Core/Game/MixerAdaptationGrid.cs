@@ -4,6 +4,7 @@ using Ibit.Plataform;
 using Ibit.Plataform.UI;
 using Ibit.Plataform.Manager.Spawn;
 using Ibit.Plataform.Data;
+using Ibit.Core.Oximetry.Integration;
 using UnityEngine;
 
 namespace Ibit.Core.Game
@@ -45,7 +46,8 @@ namespace Ibit.Core.Game
             SecurityPanelTwoExecuted = false;
         }
 
-        void AdaptationGrid(float signalPitaco, float signalMano, float signalCinta, float signalOxiSPO, float signalOxiHR)
+        void AdaptationGrid(float signalPitaco, float signalMano,
+            float signalCinta, OximetrySnapshot oximetry)
         {
             if (_spawner == null){
                 _spawner = FindObjectOfType<Spawner>();
@@ -55,8 +57,18 @@ namespace Ibit.Core.Game
             //     return;
 
             //* AvaliationNode Oxímeter - DeepDDA: Monitoramento dos biosinais e feedback (Reward)
-            if (sco.IsConnected && Time.time > currenttimeOxi + timeBetweenSamplesOxi) // Executa a quantidade de leituras escolhida pelo usuário no arquivo "_signalTreatment.csv" por minuto.
+            // The old alerts, pauses and saturation rewards stay unchanged
+            // for the legacy source. PITACO 2.4 DEMO SpO2 is a final number,
+            // but not eligible for those safety-sensitive rules.
+            if (!oximetry.EligibleForLegacySpo2Rules ||
+                !oximetry.SpO2Percent.HasValue)
             {
+                countSPORegular = 0;
+                countSPODanger = 0;
+            }
+            else if (Time.time > currenttimeOxi + timeBetweenSamplesOxi)
+            {
+                float signalOxiSPO = (float)oximetry.SpO2Percent.Value;
                 if (signalOxiSPO >= ParametersDb.parameters.MinimumRegularOxygenation && signalOxiSPO < ParametersDb.parameters.MinimumNormalOxygenation) // 85 até 94%    
                 {
                     if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem

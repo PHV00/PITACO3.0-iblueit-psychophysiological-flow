@@ -229,21 +229,18 @@ public class DeepDDAAgent : Agent
         sensor.AddObservation(FiniteObservation(performanceDelta, "performanceDelta"));
         sensor.AddObservation(FiniteObservation(episodePerformanceDelta, "episodePerformanceDelta"));
 
-        // Observa CG - pico e duração.
-        if (sessionSucceeded == 0)
+        // Preserve the existing 16-observation ONNX contract in all states.
+        // Session transitions cannot silently drop the final four elements.
+        if (sessionSucceeded == 0 && Pacient.Loaded != null)
         {
-            if (Pacient.Loaded != null)
-            {
-                sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsPeakFlow * GameManager.CapacityMultiplierPlataform, "pico inspiratorio"));
-                sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpPeakFlow * GameManager.CapacityMultiplierPlataform, "pico expiratorio"));
-                sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao inspiratoria"));
-                sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao expiratoria"));
-            }
-            else
-            {
-                // Avoid teardown NRE without reducing the observations count.
-                for (int i = 0; i < 4; i++) sensor.AddObservation(0f);
-            }
+            sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsPeakFlow * GameManager.CapacityMultiplierPlataform, "pico inspiratorio"));
+            sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpPeakFlow * GameManager.CapacityMultiplierPlataform, "pico expiratorio"));
+            sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao inspiratoria"));
+            sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao expiratoria"));
+        }
+        else
+        {
+            for (int i = 0; i < 4; i++) sensor.AddObservation(0f);
         }
     }
 
