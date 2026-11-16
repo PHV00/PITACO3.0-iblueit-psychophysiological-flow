@@ -77,6 +77,31 @@ public class OximetryDataBridgeTests
     }
 
     [Test]
+    public void SeparateLegacyOximeterKeepsSafetyRulesWhenBothAreConnected()
+    {
+        var ppg = new PpgMeasurement(12000, 25, 82, 96,
+            0.6, 0.75, "EXPERIMENTAL");
+        var primary = OximetrySnapshotFactory.FromPitaco24(
+            true, true, true, ppg, 0.1f);
+        var legacy = OximetrySnapshotFactory.FromLegacy(
+            true, 79, 98, 0.1f);
+        var chosen = OximetrySnapshotFactory.SelectForLegacyRules(
+            primary, legacy);
+
+        Assert.AreEqual(OximetrySource.Pitaco24, primary.Source);
+        Assert.AreEqual(OximetrySource.LegacyOximeter, chosen.Source);
+        Assert.AreEqual(98.0, chosen.SpO2Percent.Value);
+        Assert.IsTrue(chosen.EligibleForLegacySpo2Rules);
+
+        var unavailableLegacy = OximetrySnapshotFactory.FromLegacy(
+            false, 79, 98, 0f);
+        var fallback = OximetrySnapshotFactory.SelectForLegacyRules(
+            primary, unavailableLegacy);
+        Assert.AreEqual(OximetrySource.Pitaco24, fallback.Source);
+        Assert.IsFalse(fallback.EligibleForLegacySpo2Rules);
+    }
+
+    [Test]
     public void InvalidNumbersAndUnknownAgesNeverMasqueradeAsMeasurements()
     {
         var reading = new PpgMeasurement(12000, 25,
