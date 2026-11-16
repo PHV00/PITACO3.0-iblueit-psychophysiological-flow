@@ -79,6 +79,11 @@ namespace Ibit.Core.Game
                         ? (float)CurrentOximetry.Bpm.Value : 0f);
                 AdaptationGrid(Player.sensorValuePitaco, Player.sensorValueMano,
                     Player.sensorValueCinta, CurrentLegacyRulesOximetry);
+
+                // Acknowledge actual consumption; logging remains centralized
+                // in OximetryDataBridge and does not change ML-Agent observations.
+                if (oximetryBridge != null)
+                    oximetryBridge.RecordMixerConsumption(CurrentOximetry);
                 
                 // Debug.Log($"Pitaco: {Player.sensorValuePitaco}");
                 // Debug.Log($"Mano: {Player.sensorValueMano}");
