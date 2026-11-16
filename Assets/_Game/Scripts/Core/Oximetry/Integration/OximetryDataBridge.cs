@@ -102,6 +102,14 @@ namespace Ibit.Core.Oximetry.Integration
                 bpm, spo2, true, true, !eligible, eligible, ageSeconds);
         }
 
+        public static OximetrySnapshot SelectForLegacyRules(
+            OximetrySnapshot primary, OximetrySnapshot legacy)
+        {
+            // Preserve existing saturation alerts if a separate legacy device
+            // is connected, even while PITACO 2.4 provides the primary HUD data.
+            return legacy.EligibleForLegacySpo2Rules ? legacy : primary;
+        }
+
         public static OximetrySnapshot FromLegacy(
             bool connected, double bpm, double spo2, float ageSeconds)
         {
@@ -216,6 +224,23 @@ namespace Ibit.Core.Oximetry.Integration
 
             // Legacy oximeter remains independent: no stale values after
             // disconnection and no silent fallback while PITACO 2.4 is active.
+            return GetLegacySnapshot();
+        }
+
+        // A separate legacy device must keep its original safety-path
+        // behavior when both sensors are connected. It does NOT replace
+        // the PITACO 2.4 primary snapshot shown to the Mixer.
+        public OximetrySnapshot GetLegacyRulesSnapshot()
+        {
+            OximetrySnapshot primary = GetSnapshot();
+            if (primary.Source == OximetrySource.LegacyOximeter)
+                return primary;
+            return OximetrySnapshotFactory.SelectForLegacyRules(
+                primary, GetLegacySnapshot());
+        }
+
+        private OximetrySnapshot GetLegacySnapshot()
+        {
             if (legacyController == null)
                 legacyController = FindObjectOfType<SerialControllerOximetro>();
             bool connected = legacyController != null && legacyController.IsConnected;
