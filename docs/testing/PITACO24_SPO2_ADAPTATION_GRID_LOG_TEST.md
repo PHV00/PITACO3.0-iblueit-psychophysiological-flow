@@ -180,3 +180,79 @@ que tais valores ou a SpO2 DEMO estejam clinicamente validados.
 
 Este relatório registra apenas evidências vistas no log recebido e no
 código/configuração da branch; **não indica precisão clínica**.
+
+
+## Execução 2 — correção isolada pronta para reteste
+
+**Commit de código:** `548075ac760a6a9e7bd4ba74fd5d602253970b28`  
+**Arquivo:** `Assets/_Game/Scripts/Core/Game/MixerAdaptationGrid.cs`
+
+O `AdaptationGrid` usa os valores **mínimo regular 89** e
+**mínimo normal 95** apenas quando
+`OximetrySnapshot.Source == OximetrySource.Pitaco24`.
+Para fontes legadas, continua lendo
+`ParametersDb.parameters.MinimumRegularOxygenation` e
+`MinimumNormalOxygenation`. O perfil `P` e o CSV são mantidos
+inalterados: todos os demais parâmetros do gameplay são preservados.
+
+Os registros `[SpO2Grid-Test]` agora incluem
+`perfilLimiar=Pitaco24Test` ou `LegadoConfig`, e registram
+**os limiares efetivamente aplicados**, não os zeros do perfil P.
+
+Faixas da **lógica funcional**: `0 < SpO2 < 89` perigo,
+`89 <= SpO2 < 95` regular, `SpO2 >= 95` normal.
+Estes números vêm da linha `PO` existente no CSV e são
+reaproveitados para teste, **não são cortes clinicamente validados
+para o novo dispositivo**.
+
+Para repetir:
+1. Atualizar **somente** a branch `test/pitaco24-spo2-adaptation-grid-logs`.
+2. Verificar `perfilLimiar=Pitaco24Test`, `limiarRegular=89`,
+   `limiarNormal=95` no log.
+3. Sem manipular saturação de pessoas, observar a classificação
+   de leituras naturais; para cobrir os dois painéis, preferir
+   reproduções sintéticas isoladas de `OximetrySnapshot`.
+4. Conferir contadores `0/2 -> 1/2 -> 2/2` quando aplicável,
+   painéis, pausa e recompensas. A regra atual zera os contadores
+   quando a leitura deixa de ser elegível; duas leituras não
+   necessariamente são consecutivas entre faixas.
+5. Confirmar que nenhuma leitura com `legacyRules=False`
+   chega às ações de saturação.
+
+### Diagnóstico dos traços "--" na HUD do teste anterior
+
+A análise de código mostra vários mecanismos **distintos**:
+
+- Regra de contato **3 amostras falsas consecutivas**:
+  1 ou 2 falhas não apagam o buffer, mas **já colocam
+  `LastMeasurement` com BPM/SpO2 nulos**. O `Player` torna
+  o "--" visível de imediato. Após 3, remove contato confirmado,
+  limpa janela e revoga G1; 8 s de nova coleta são exigidos.
+- Falha de G1 (`reason=2` ou `reason=4` vistos nos logs)
+  limpa o buffer e invalida os dois estimadores mesmo com
+  `contato=True`. Uma reprovação do G1 a cada 5 s pode
+  prolongar a espera até uma janela contínua de 8 s.
+- Um `G1=Passed` não garante SpO2: `Spo2Estimator`
+  rejeita janelas com lacunas reconstruídas, razão RED/IR
+  fora de [0.2,1.4] ou estimativa DEMO fora de [70,100].
+  `BpmEstimator` possui validação independente; pode
+  haver BPM "--" enquanto a SpO2 aparece, e vice-versa.
+- O `Player` da cena consulta
+  `PpgProcessingCoordinator.LastMeasurement` diretamente,
+  atualiza a HUD em até 1 s e remove valores imediatamente
+  na invalidação. O `Mixer` consulta o `OximetryDataBridge`,
+  com validade adicional de idade máxima de 2 s.
+  Portanto o caminho visual e o do Mixer não são totalmente
+  equivalentes no código atual.
+- O último log confirma `JSON invalido=0` e
+  `amostraInvalida=0`, além de G1 `Passed/Failed`,
+  um evento `perdasContatoConfirmadas=1` e
+  `lacunasContatoToleradas=2`.
+  Não é possível atribuir **todas** as perdas visuais a
+  um único gate com o log agregado atual.
+
+Próxima melhoria de instrumentação, **não realizada aqui**:
+registrar causas granulares de invalidação/publicação em cada
+janela e comparar timestamps de `Player`, `Bridge`,
+G1 e detector de contato; usar isso antes de reduzir
+limiares ou relaxar o G1.
