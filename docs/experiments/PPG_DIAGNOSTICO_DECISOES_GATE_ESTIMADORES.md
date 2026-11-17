@@ -29,7 +29,7 @@
 | `BRIDGE_TRANSITION` / `BRIDGE_HEARTBEAT` | Fonte, contato/G1 reais, publicação idêntica, idade, elegibilidade, BPM, SpO2 DEMO e confirmação de consumo Mixer |
 | `SUMMARY` | A cada 10 s: JSON/amostras recebidas, descartes reais da fila (incluindo a fila do Manager), erros de parser, contato, G1 e buffer |
 
-**Frequência:** G1 por janela; contato/reset por evento; estimadores a cada transição de motivo e, quando repetido, no máximo uma linha a cada 2 s; Bridge ao mudar de estado ou após 10 s; resumo a cada 10 s. Os valores da HUD não são mantidos como "medição nova".
+**Frequência:** G1 por janela; contato/reset por evento; estimadores em **toda avaliação efetiva de ~400 ms** (para auditar cada cálculo), enquanto os estados repetidos de espera/bloqueio são limitados a uma linha a cada 2 s; Bridge ao mudar de estado ou após 10 s; resumo a cada 10 s. Os valores da HUD não são mantidos como "medição nova".
 
 ### Motivos de rejeição BPM
 
