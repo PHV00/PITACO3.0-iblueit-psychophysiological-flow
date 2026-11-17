@@ -57,9 +57,9 @@ namespace Ibit.Core.Game
             //     return;
 
             //* AvaliationNode Oxímeter - DeepDDA: Monitoramento dos biosinais e feedback (Reward)
-            // The old alerts, pauses and saturation rewards stay unchanged
-            // for the legacy source. PITACO 2.4 DEMO SpO2 is a final number,
-            // but not eligible for those safety-sensitive rules.
+            // Integration-test branch: the original saturation alerts, pauses
+            // and rewards are also exercised with eligible PITACO 2.4 DEMO data.
+            // DEMO is uncalibrated: do not use these alerts for patient safety.
             if (!oximetry.EligibleForLegacySpo2Rules ||
                 !oximetry.SpO2Percent.HasValue)
             {
