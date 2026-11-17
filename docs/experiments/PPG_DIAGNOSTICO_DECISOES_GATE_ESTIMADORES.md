@@ -1,74 +1,84 @@
-# Marco 3 — Rastreamento das decisões PPG (instrumentação sem ajustes de limiar)
+# Marco 3 — investigação de qualidade PPG EXCLUSIVAMENTE na Unity
 
-**Branch Unity:** `test/ppg-quality-decision-trace`, derivada de `test/pitaco24-spo2-adaptation-grid-logs`.
-**Branch firmware/Python correspondente:** `PHV00/PITACO_ESP32:test/ppg-g1-window-metrics`, derivada de `test/ppg-long-session-csv-logging`.
-**Objetivo:** localizar onde uma janela do MAX30105 é rejeitada, desde a aquisição até a HUD e o Mixer. **Nenhum threshold, estimador, controle de contato, política de BPM/SpO2 ou recompensa foi reajustado.**
+**Repositório editado:** `PHV00/iblueit-psychophysiological-flow-pitaco2.4-port`
+**Branch de diagnóstico:** `test/ppg-quality-decision-trace`, derivada de `test/pitaco24-spo2-adaptation-grid-logs`.
 
-## Como usar
+**Regra desta etapa:** não alterar firmware, INO, hardware, protocolo JSON, biblioteca BLE, configuração do MAX30105 ou Python do PITACO. Usar o **firmware original** que já está instalado e funciona. O trabalho anterior de diagnóstico no repositório `PITACO_ESP32` foi desfeito na sua branch experimental; esta investigação só exige mudanças no C# da Unity.
 
-1. No Unity, abrir `Window > General > Console` e filtrar `[PPG-DIAG]`. Desmarcar `Collapse` para manter cada decisão em ordem. Continuar a observar também os logs `[SpO2Grid-Test]` quando forem analisados os painéis/recompensas.
-2. Executar o jogo usando o firmware gravado a partir da branch de diagnóstico. **A troca de branch de código, sozinha, não atualiza o ESP32.** O firmware antigo continua funcional, mas o campo `metrics=UNAVAILABLE_OLD_FIRMWARE` indicará a ausência das métricas novas.
-3. Fazer ensaio controlado de 90–120 s com contato estável, sem dessaturação provocada. Anotar quando ocorrem movimentação, variação de pressão e retirada/reposição do dedo. Não registrar dados pessoais.
-4. Salvar logs completos do Console e CSV bruto do monitor Python, de preferência em execuções separadas da COM USB. Uma captura Python/BLE concorrente só é válida se não houver disputa pelo dispositivo/fluxo.
-5. Combinar registros pelo `devMs`, `window` e `seq` **somente se forem da mesma sessão efetiva do firmware**. Se Unity e Python capturarem ensaios separados, comparar distribuições e causas agregadas, nunca alinhar janelas 1:1. `t` no Console é relógio Unity e não deve ser confundido com `t_ms` do ESP32.
+## Pergunta experimental
 
-## Eventos [PPG-DIAG] e o que demonstram
+Por que a HUD da Unity passa de BPM/SpO2 DEMO para `--`, ainda que o dedo não tenha sido retirado e a coleta Python/BLE tenha mostrado comportamento mais estável?
 
-| Evento | O que contém/como interpretar |
+As hipóteses devem ser separadas por estágio, sem supor antecipadamente que o firmware ou o limiar G1 é defeituoso:
+
+1. Uma mensagem `type=g1` recebida com `sqi.g1=false` bloqueia o cálculo na Unity — é a decisão **oficial** do firmware.
+2. Amostras `type=sample` recebidas com `sqi.contact=false` causam quarentena do dado; três consecutivas reiniciam janela e estado de G1.
+3. Perda de sequência, idade do G1, taxa de amostragem efetiva ou janela incompleta impedem o processamento de oito segundos.
+4. Mesmo com janela íntegra, `BpmEstimator` pode reprovar autocorrelação ou pico; `Spo2Estimator` pode reprovar lacuna reconstruída, RMS, razão R ou faixa da fórmula DEMO.
+5. A medição pode ser rejeitada no `OximetryDataBridge` por publicação inválida/antiga (>2 s) enquanto a HUD exibe seu valor independente por tolerância visual. Isto **não** prova uma falha do sensor.
+
+## Como a Unity observa as estatísticas RED/IR sem alterar o ESP32
+
+A Unity já recebe os pares RED/IR em cada JSON `type=sample`. A classe de diagnóstico `PpgRawG1Probe.cs` armazena até 6,5 segundos / 384 amostras desses pares **antes** dos filtros Unity. Quando chega o evento `type=g1` original, com `sqi.reason` e `sqi.samples`:
+
+- Seleciona até a quantidade de amostras declaradas pelo firmware dentre as mais recentes entregues à Unity.
+- Calcula localmente `redMin/redMax/redMean/redRange`, `irMin/irMax/irMean/irRange`, contagem de clipping, contagem de contatos falsos e descontinuidades de sequência.
+- Registra `observed`, `reported`, `countCovered`, `sequenceGaps`, `spanMs` e `match`.
+- Usa valores de referência `refMinRange=500` e `refMinMean=5000` **apenas no log**. Não aplica um novo G1, não reclassifica `reason` e não modifica limiar algum.
+- Continua a usar `sqi.g1`, `sqi.reason`, `sqi.samples` do firmware como única autoridade para aprovar/rejeitar G1.
+
+A marca `metrics=UNITY_RAW_SHADOW_NOT_FIRMWARE` significa que esses números são **observações da Unity**, não valores transmitidos/calculados pelo firmware. `match=CANDIDATE_ONLY` indica contagem e sequência aparentemente completas, mas **não certifica correspondência exata**: o firmware pode ter reiniciado sua janela por contato, FIFO, I2C ou temporização sem que a Unity reproduza os mesmos limites. `match=INCOMPLETE` indica falta de cobertura/continuidade. Uma falha de aquisição interna (`GAP`) é `acquisitionGap=UNOBSERVABLE` e não pode ser inferida exclusivamente do JSON entregue.
+
+**Atenção ao exemplo 477:** um `redRange=477` local não deve ser apresentado como amplitude G1 oficial nem como prova de sinal fisiológico bom. A observação permite formular hipóteses: a medida local está 23 ADC abaixo do limiar de referência de 500 (4,6%), mas o motivo `reason` do firmware e a qualidade pulsátil real precisam ser avaliados separadamente.
+
+## Protocolo prático no Unity Editor
+
+1. Atualizar **apenas o repositório Unity** para `test/ppg-quality-decision-trace`. Deixar a placa e o firmware exatamente como estão.
+2. Abrir `Window > General > Console`, desmarcar `Collapse` e aplicar o filtro `[PPG-DIAG]`. Os logs `[SpO2Grid-Test]` continuam disponíveis se for necessário acompanhar eventos do Mixer.
+3. Realizar 90–120 s com dedo estável. Anotar, com relógio da sessão, quando houver leve alteração de pressão ou movimento; opcionalmente fazer um segundo ensaio com uma retirada deliberada para validar `CONTACT_LOST`. Evitar qualquer procedimento de dessaturação.
+4. Guardar todo o Console em texto (com timestamps). Sem outro programa concorrente na mesma porta USB. Não é necessário gravar firmware, recompilar INO nem habilitar novas mensagens no PITACO.
+5. Correlacionar `G1_REJECT/G1_PASS`, `CONTACT_*`, `WINDOW_RESET`, `CALC` e `BRIDGE_TRANSITION` pelos campos `devMs` (relógio do dispositivo), `seq`, `window` e `t` (relógio Unity). Os relógios são diferentes. Capturas Python feitas em outra sessão só podem ser comparadas estatisticamente, não janela a janela.
+
+## Eventos de diagnóstico
+
+| Evento | O que investigar |
 | --- | --- |
-| `G1_PASS` / `G1_REJECT` | Resultado a cada janela ~5 s; `reason`, `samples`, `devMs`, `window`, `bufferBefore`, estatísticas RED/IR recebidas |
-| `CONTACT_GLITCH` | Primeira leitura instantânea sem contato; **não** é retirada física confirmada |
-| `CONTACT_LOST` | Terceira falta consecutiva no critério Unity, não necessariamente retirada física intencional |
-| `CONTACT_PRESENT` | Recuperação e quantas amostras de contato foram toleradas |
-| `HUD_HOLD_START` | Retenção de até duas falhas **somente visual**; Mixer continua consumindo leitura validada |
-| `G1_REVOKED` / `G1_EXPIRED` | PASS antigo invalidado por amostra de reset ou idade |
-| `WINDOW_RESET` / `SEQUENCE_RESET` | Causa exata da perda do buffer, tamanho descartado e identificadores |
-| `CALC stage=G1_BLOCK` | G1 ainda impede o processamento; não logar cada amostra, apenas transição e amostra a cada 2 s |
-| `CALC stage=WINDOW_REJECT` | Motivo de rejeição da janela C# (ainda incompleta, taxa efetiva inadequada, sequências, ADC, lacunas >2%, DC) |
-| `CALC stage=ESTIMATORS` | Janela aprovada: tamanho, fs, redDC/irDC, redACrms/irACrms, reconstruções, autocorrelação, lag, razão R, resultado e motivo independente de BPM e SpO2 DEMO |
-| `BRIDGE_TRANSITION` / `BRIDGE_HEARTBEAT` | Fonte, contato/G1 reais, publicação idêntica, idade, elegibilidade, BPM, SpO2 DEMO e confirmação de consumo Mixer |
-| `SUMMARY` | A cada 10 s: JSON/amostras recebidas, descartes reais da fila (incluindo a fila do Manager), erros de parser, contato, G1 e buffer |
+| `G1_PASS` / `G1_REJECT` | Decisão oficial do firmware (`reason`, `samples`) e métricas observadas localmente (`metrics=UNITY_RAW_SHADOW_NOT_FIRMWARE`) |
+| `CONTACT_GLITCH` | Primeiro `contact=false`; **não comprova que o dedo foi fisicamente retirado** |
+| `CONTACT_LOST` | Terceira falha consecutiva e reinício do estado no Unity |
+| `CONTACT_PRESENT` | Contato recuperado; quantas amostras foram temporariamente ignoradas |
+| `HUD_HOLD_START` | Manutenção visual de valor anterior; não alimenta o Mixer |
+| `G1_REVOKED` / `G1_EXPIRED` | PASS antigo invalidado pelo estado/idade |
+| `WINDOW_RESET` / `SEQUENCE_RESET` | Motivo de descarte das amostras de oito segundos |
+| `CALC stage=G1_BLOCK` | Bloqueio antes de passar ao processamento |
+| `CALC stage=WINDOW_REJECT` | Janela incompleta, FIFO/seq, fs, DC ou mais de 2% de lacunas |
+| `CALC stage=ESTIMATORS` | **Cada cálculo real (~400 ms)**: fs, reconstruções, DC e RMS, autocorrelação, lag, R, BPM, SpO2 DEMO e seus motivos independentes |
+| `BRIDGE_TRANSITION` / `BRIDGE_HEARTBEAT` | Medição aceita/recusada no Bridge, fonte, idade, contato, G1 e leitura pelo Mixer |
+| `SUMMARY` | A cada 10 s: amostras, erros de parsing, perdas da fila, contato, G1 e buffer |
 
-**Frequência:** G1 por janela; contato/reset por evento; estimadores em **toda avaliação efetiva de ~400 ms** (para auditar cada cálculo), enquanto os estados repetidos de espera/bloqueio são limitados a uma linha a cada 2 s; Bridge ao mudar de estado ou após 10 s; resumo a cada 10 s. Os valores da HUD não são mantidos como "medição nova".
+Estados repetidos de espera são limitados a uma linha a cada 2 s; os cálculos reais do estimador são registrados individualmente.
 
-### Motivos de rejeição BPM
+### Regras C# mantidas sem alteração
 
-- `INPUT_IR_AC_INSUFFICIENT`, `LAG_RANGE_INVALID`, `AUTOCORR_BELOW_0_57`, `PEAK_NOT_FOUND`, `BPM_OUT_OF_RANGE`, `OK`.
-- A autocorrelação continua com limiar 0,57 e estimativa dentro de 35–200 BPM. `lag` é amostral; quando houver falha antes do pico, vale 0.
+- BPM por autocorrelação IR (`MinimumAutocorrelation=0.57`, faixa 35–200 BPM): motivos `INPUT_IR_AC_INSUFFICIENT`, `LAG_RANGE_INVALID`, `AUTOCORR_BELOW_0_57`, `PEAK_NOT_FOUND`, `BPM_OUT_OF_RANGE`, `OK`.
+- SpO2 **DEMO não calibrada**: `RECONSTRUCTED_PPG_GAP`, `DC_NOT_POSITIVE`, `AC_RMS_TOO_LOW`, `RATIO_OUTSIDE_0_2_TO_1_4`, `SPO2_DEMO_OUTSIDE_70_TO_100`, `OK`.
+- O firmware continua decidindo o G1, inclusive `reason=4` (RED_FLAT), sem nenhuma modificação.
+- O `OximetryDataBridge` e a lógica de adaptação continuam consumindo a medição corrente validada, não o valor temporariamente retido da HUD.
 
-### Motivos de rejeição SpO2 DEMO
+## Logs reduzidos
 
-- `INPUT_NULL`, `RECONSTRUCTED_PPG_GAP`, `DC_NOT_POSITIVE`, `AC_RMS_TOO_LOW`, `RATIO_OUTSIDE_0_2_TO_1_4`, `SPO2_DEMO_OUTSIDE_70_TO_100`, `OK`.
-- A fórmula DEMO e os limites preexistentes permanecem **inalterados**. Um resultado numérico DEMO não certifica saturação nem pode orientar decisão clínica.
+- O relatório verboso antigo de contadores JSON foi substituído por `[PPG-DIAG]` com eventos.
+- Foram silenciados os `[PITACO 2.4] JSON: 100/200/...`, os registros redundantes do Bridge e as narrações rotineiras de ações do DeepDDA.
+- Eventos significativos de adaptação, erros de conexão, exceções, avisos de cenas e erros de componentes **continuam visíveis**. O filtro do Console isola o tema PPG sem esconder defeitos reais.
 
-### Distinção fundamental: G1 x estimadores
+## Testes de regressão e limites de evidência
 
-```text
-G1 REJECT reason=4 + redRange=477, minRange=500
-          -> BUFFER_RESET (Unity descarta janela 8s)
-          -> CALC G1_BLOCK / WINDOW_REJECT (reacumulação)
-          -> CALC ESTIMATORS quando houver janela completa e G1 PASS
-                  bpmReason=... autocorr=... lag=...
-                  spo2Reason=... ratioR=... redACrms=...
-          -> BRIDGE_TRANSITION cause=... (ou AVAILABLE)
-```
+Os testes Unity `PpgProcessingTests` agora verificam:
+- Compatibilidade numérica dos estimadores detalhados com suas APIs anteriores.
+- Diagnósticos de reprovação por autocorrelação/AC RMS/lacunas.
+- Recepção do **JSON G1 original, sem nenhum objeto novo**.
+- Janela sintética local com `redRange=477` e IR=820, contagem e continuidade válidas, sem alterar aprovação G1.
+- Identificação explícita de frames perdidos e seleção das últimas N amostras.
+- Regras anteriores de contato, rejeição G1, buffer, HUD e Bridge.
 
-**Sobre 477 ADC:** 477 é 23 contagens (4,6%) abaixo do limiar de 500. Isso prova **somente que a regra atual reprova essa faixa**, não que os valores de SpO2 DEMO são corretos, que a forma de onda possui pulso ou que a saturação foi validada. A primeira análise deve contar quantas janelas G1 seriam candidatas a PASS se `G1_MIN_RANGE` fosse, por exemplo, 450, **sem efetuar essa mudança**; exige sinais RAW e rótulos de qualidade independentes. Verificar também IR, clipping, média e GAP, para não criar falsos positivos.
-
-## Registros reduzidos (somente branch de diagnóstico)
-
-- Removido o relatório antigo verboso `[PPG C# diagnostico]`; substituído por eventos `[PPG-DIAG]` e `SUMMARY`.
-- Desativadas mensagens `[PITACO 2.4] JSON: N` a cada 100 callbacks. Conexão, desconexão e erros permanecem.
-- O Bridge deixa de despejar o mesmo `[OximetryBridge->Mixer]` a cada 5 s; apresenta causas por transição e heartbeat 10 s.
-- Nas regras de gameplay, silenciados **apenas** relatórios repetitivos de recompensa normal +0,1; continuam logs de estado elegível, classificação REGULAR/PERIGO, painéis, recompensa negativa e agente ausente.
-- As mensagens narrativas do DeepDDA sobre aumentar/manter/diminuir velocidade/carga foram silenciadas, **sem alterar ações do modelo**.
-- **NÃO foram silenciados** problemas reais como `Target destruído` ou `Missing Script` da cena. Esses são defeitos reais e permanecem no Console, mas podem ser isolados pelo filtro `[PPG-DIAG]`.
-
-## Critério para encerrar o diagnóstico
-
-1. Cada janela G1 falha/passada deve ter RED/IR média, mínimo/máximo, range, clips, GAP e limiar de referência; distinguir firmware antigo por campo ausente.
-2. Para cada `--`, deve haver um evento associado: bloqueio G1, buffer incompleto, autocorrelação BPM insuficiente, vetos do ratio/RMS/reconstruções da SpO2, ou Bridge sem publicação.
-3. Antes de propor redução do limiar, medir taxa de rejeição, taxa de pulsos utilizáveis por janela rotulada e efeito contrafactual em falsos positivos; não usar SpO2 DEMO como rótulo de verdade.
-4. Executar Unity EditMode `PpgProcessingTests` e validação em hardware. Testes adicionados cobrem compatibilidade dos estimadores e recepção opcional de métricas G1; **ainda não há resultado executado registrado neste commit**.
-
-**Pontos de código:** `PpgProcessingCoordinator.cs`, `PpgSignalProcessor.cs`, `BpmEstimator.cs`, `Spo2Estimator.cs`, `OximetryDataBridge.cs`, `MixerAdaptationGrid.cs` e arquivos de teste Unity. O firmware/Python gera e persiste estatísticas G1 sob o objeto JSON opcional `stats`, sem alterar `sqi`.
+**Validação pendente:** executar Unity EditMode Test Runner e realizar teste com hardware real. Analisar o log final antes de ajustar critérios; o G1 oficial, a janela observada localmente e os estimadores C# são etapas diferentes. Nenhum valor de SpO2 DEMO deve ser tratado como medição clínica.
