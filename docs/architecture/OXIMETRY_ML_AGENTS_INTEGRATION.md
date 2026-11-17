@@ -29,8 +29,9 @@ ou mudança no comportamento da rede neural neste marco.
   conectado e com dados recentes. Isso impede que a conexão simultânea do
   PITACO 2.4 desative inadvertidamente os mecanismos legados.
 - `MixerAdaptationGrid` continua com os mesmos limiares, pausas, painéis
-  e recompensas; passou a exigir o indicador `EligibleForLegacySpo2Rules`
-  em vez de depender apenas de `sco.IsConnected`.
+  e recompensas; exige `EligibleForLegacySpo2Rules` em vez de depender
+  apenas de `sco.IsConnected`. Na branch experimental, a SpO2 DEMO do
+  PITACO 2.4 pode habilitar esse indicador apenas para teste de gameplay.
 - `DeepDDAAgent.CollectObservations` agora sempre entrega 16 observações;
   nas transições em que não há capacidade disponível, as últimas quatro
   entradas recebem zeros, sem alterar a ordem ou o ONNX.
@@ -57,23 +58,33 @@ DeepDDAAgent.onnx: MESMAS 16 observações -> MESMAS 3 ações
 
 ## 'Final' não significa 'clinicamente validado'
 
-O BPM/SpO2 são valores já calculados, apresentados por contrato como números
-prontos para consumo, mas a `Spo2Estimator.TryEstimateDemo` permanece
-**não calibrada**. O valor demonstrativo nunca pode ser usado para
-acionar os painéis de segurança, a pausa por saturação ou recompensas
-fisiológicas da regra legada. Não afirmamos precisão clínica. Os
-resultados também não são novas entradas do ONNX atual.
+O BPM/SpO2 são valores já calculados, mas a `Spo2Estimator.TryEstimateDemo`
+permanece **não calibrada**. O resultado continua marcado como
+`SpO2IsDemonstration=true`, mesmo quando as regras do jogo estiverem
+habilitadas. Não afirmamos precisão clínica ou confiabilidade dos alertas.
+Os resultados não são novas entradas do ONNX atual.
 
-Para preparar a compatibilidade futura sem mudar o Mixer, `PpgMeasurement`
-ganhou o indicador `SpO2CalibratedForLegacyRules` com **default false**.
-Somente uma futura implementação validada e documentada poderá marcar
-esse contrato como true. Não fazer isso apenas para liberar alertas.
+**Alteração provisória desta branch de teste:**
+`OximetrySnapshotFactory.EnableDemoSpo2LegacyRulesForTesting = true`.
+Assim, quando PITACO 2.4 estiver conectado, houver contato, G1 aprovado,
+publicação recente (<= 2 s) e um valor de SpO2 numericamente válido,
+`EligibleForLegacySpo2Rules=true`, independentemente da calibração.
+Isso reativa no `MixerAdaptationGrid` os limiares, recompensas, pausas e
+painéis legados **para testes funcionais sem pacientes**. Uma estimativa
+incorreta pode disparar um alerta falso, inclusive a partir de valores
+experimentais como 78,5%. Não usar para decisões médicas nem em sessões
+clínicas. Para restaurar o bloqueio antes de uso com pacientes, definir
+essa constante como `false` e verificar o resultado em Unity.
+
+O indicador de calibração independente `PpgMeasurement.SpO2CalibratedForLegacyRules`
+permanece `false` por padrão. Somente uma implementação realmente calibrada
+e validada deverá marcá-lo `true`; o teste funcional não modifica esse fato.
 
 ## Prioridade das fontes e dados ausentes
 
 | Estado | Saída do Bridge | Regras legadas |
 | --- | --- | --- |
-| PITACO 2.4 conectado, G1+contato e publicação recente | BPM final e SpO2 DEMO se disponíveis | Bloqueadas (DEMO) |
+| PITACO 2.4 conectado, G1+contato e publicação recente | BPM final e SpO2 DEMO se disponíveis | Habilitadas para teste se SpO2 presente |
 | PITACO 2.4 conectado, aguardando primeira janela | Valores indisponíveis | Bloqueadas |
 | PITACO 2.4 com 1-2 falhas transientes, G1 expirado, reset ou falha de contato | Valores indisponíveis | Bloqueadas |
 | PITACO 2.4 com BPM, mas sem SpO2 (lacuna reconstruída) | Só BPM | Bloqueadas |
@@ -99,7 +110,7 @@ O `OximetryDataBridge` agora registra, **por padrão e a cada 5 segundos**
 (configurável em `logIntervalSeconds`), a linha:
 
 ```text
-[OximetryBridge->Mixer] source=Pitaco24 | bpm=59,1 | spo2=90,5 | demo=True | contato=True | G1=True | legacyRules=False | age=0,2s | mixer=RECEBIDO | mixerReads=240 | mixerSource=Pitaco24 | mixerBpm=59,1 | mixerSpo2=90,5
+[OximetryBridge->Mixer] source=Pitaco24 | bpm=59,1 | spo2=90,5 | demo=True | contato=True | G1=True | legacyRules=True | age=0,2s | mixer=RECEBIDO | mixerReads=240 | mixerSource=Pitaco24 | mixerBpm=59,1 | mixerSpo2=90,5
 ```
 
 Exemplo ilustrativo, **não é um log real do hardware**. O separador decimal
@@ -113,8 +124,10 @@ varia conforme a configuração regional do Unity.
   que esse consumo recente não foi confirmado.
 - `mixerReads` contabiliza as confirmações durante a execução e
   `mixerBpm`/`mixerSpo2` mostram o último snapshot consumido.
-- O campo `demo=True` e `legacyRules=False` preserva o bloqueio da SpO2
-  demonstrativa para os painéis antigos.
+- Nesta branch de teste, `demo=True` e `legacyRules=True` podem aparecer
+  juntos: o dado **continua não calibrado**, porém o Mixer pode acionar
+  a regra legada do jogo com essa leitura. O log sozinho não prova que um
+  painel de alerta foi acionado.
 - Este log **não prova que o ONNX recebeu BPM/SpO2 como observações**:
   o modelo mantém as 16 observações originais e não foi retreinado.
 
@@ -134,9 +147,13 @@ e a frequência pode ser ajustada sem alterar a aquisição PPG.
   `CurrentLegacyRulesOximetry.Source`,
   `EligibleForLegacySpo2Rules`, decisões do agente e resultados de G1.
 - Confirmar que ONNX, 16 observações, ações, YAML, e política de inferência
-  não foram alterados. Verificar os painéis legados em equipamento
-  independente apropriado; zero painéis por SpO2 DEMO 2.4.
+  não foram alterados. Em teste sem pacientes, verificar um valor válido
+  com `demo=True | legacyRules=True | mixer=RECEBIDO` e o resultado real
+  dos painéis/recompensas ao cruzar limiares durante a cadência configurada.
+  Repetir sem contato, G1 reprovado, SpO2 ausente e timeout: nenhuma regra
+  deve consumir uma medição inválida.
 
-**Estado:** implementação realizada na branch experimental; a compilação
-Unity, execução dos testes, hardware e precisão clínica ainda precisam
-de verificação. Nenhuma homologação clínica é reivindicada.
+**Estado:** modo de teste funcional com regras legadas habilitadas para SpO2
+DEMO elegível na branch `feature/ppg-csharp-bpm-spo2-mvp`. Compilação Unity,
+execução dos testes e comportamento dos painéis com hardware ainda precisam
+de verificação. A SpO2 não foi calibrada ou clinicamente validada.
