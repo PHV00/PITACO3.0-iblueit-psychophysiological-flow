@@ -112,7 +112,7 @@ namespace Ibit.Plataform
                 pitaco24PpgCoordinator = manager.GetComponent<PpgProcessingCoordinator>();
 
             var sample = pitaco24PpgCoordinator != null
-                ? pitaco24PpgCoordinator.LastMeasurement : null;
+                ? pitaco24PpgCoordinator.HudMeasurement : null;
 
             if (pitaco24PpgCoordinator == null ||
                 !pitaco24PpgCoordinator.OpticalContactConfirmed ||
