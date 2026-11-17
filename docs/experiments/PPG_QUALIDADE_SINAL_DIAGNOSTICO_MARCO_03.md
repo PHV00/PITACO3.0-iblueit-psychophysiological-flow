@@ -40,6 +40,18 @@ Preparacao: identificar modelo real da placa optica (MAX30105/MAX30102), firmwar
 4. **Controle sem dedo:** curto segmento com contato ausente, sem tratá-lo como onda de referencia; verificar rejeicao G1/contato.
 5. **Opcional:** repetir a base com outra posicao do dedo e/ou LED configuration em experimento separado, nunca mudando multiplas variaveis por vez.
 
+**Coleta USB reproducivel — executar fora da Unity:** o jogo e o probe nao podem abrir COM3 simultaneamente. Fechar PlayMode/monitor serial e confirmar a porta antes de iniciar. O probe existente envia `e`, depois `r` para iniciar a sessao e `f` no final; logo o experimento e separado da execucao do jogo.
+
+Na raiz do repositorio `PHV00/PITACO_ESP32`:
+
+```powershell
+python -m pip install pyserial
+python .\arduino-pitaco-mpx5010dp-ble\pitaco_experimental\pitaco24_ppg_probe.py COM3 --seconds 90 --csv ppg_base_90s.csv
+python .\arduino-pitaco-mpx5010dp-ble\pitaco_experimental\analyze_ppg_25hz.py ppg_base_90s.csv --output ppg_base_90s_report.json
+```
+
+Repetir o probe com nome distinto para cada condicao. O `pitaco24_ppg_probe.py` ja grava os eventos `type=g1` com seus reasons e `samples`, alem dos `type=sample` RED/IR. A captura do dispositivo deve ficar local; nunca realizar esta coleta concorrente com o Unity conectado a mesma COM.
+
 Registrar CSV local (NAO commitar RAW nem dados pessoais) com `type,seq,t_ms,red,ir,bpm_valid,g1,reason,samples,contact` e logs `X,PPG_DIAG`, `X,PPG_FIFO_OVERFLOW`, `X,PPG_SW_RING_OVERRUN`, `X,PPG_I2C_FIFO_READ_ERROR` se presentes. Adicionar anotacoes manuais do tempo, montagem, movimento e relogio Unity.
 
 No repositorio do firmware ja existe o analisador offline:
