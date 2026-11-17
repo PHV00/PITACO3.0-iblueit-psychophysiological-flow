@@ -73,23 +73,12 @@ namespace Ibit.Core.Oximetry
         }
 
         [Serializable]
-        private sealed class Gate01StatsPayload
-        {
-            public int red_min, red_max, red_mean, red_range;
-            public int ir_min, ir_max, ir_mean, ir_range;
-            public int red_clips, ir_clips;
-            public bool gap;
-            public int limit_mean, limit_range;
-        }
-
-        [Serializable]
         private sealed class Gate01Frame
         {
             public string type;
             public long t_ms;
             public int window;
             public Gate01SqiPayload sqi;
-            public Gate01StatsPayload stats; // optional: old firmware still works
         }
 
         private enum Gate01State
@@ -119,6 +108,9 @@ namespace Ibit.Core.Oximetry
         private float nextCalculationTraceAt;
 
         private readonly PpgSampleBuffer buffer = new PpgSampleBuffer();
+        // Diagnostics only, never feeds any gate, measurement or game decision.
+        private readonly PpgRawG1Probe rawG1Probe = new PpgRawG1Probe();
+        public PpgRawG1Summary LastG1ShadowSummary { get; private set; }
         private bool hasPreviousProcessingTime;
         private uint previousProcessingMs;
         private float nextSearchTime;
@@ -192,6 +184,8 @@ namespace Ibit.Core.Oximetry
 
         private void OnEnable()
         {
+            rawG1Probe.Clear();
+            LastG1ShadowSummary = null;
             ResetMeasurements("Aguardando amostras RED/IR");
             AttachIfAvailable();
         }
@@ -255,6 +249,8 @@ namespace Ibit.Core.Oximetry
 
         private void OnDisable()
         {
+            rawG1Probe.Clear();
+            LastG1ShadowSummary = null;
             if (serialController != null)
             {
                 serialController.OnJsonReceived -= ReceiveJson;
@@ -265,6 +261,8 @@ namespace Ibit.Core.Oximetry
 
         private void OnDeviceDisconnected()
         {
+            rawG1Probe.Clear();
+            LastG1ShadowSummary = null;
             ResetMeasurements("PITACO 2.4 desconectado");
         }
 
@@ -379,21 +377,11 @@ namespace Ibit.Core.Oximetry
             lastGate01Samples = result.sqi.samples;
             gate01Frames++;
 
-            string stats = result.stats == null
-                ? "metrics=UNAVAILABLE_OLD_FIRMWARE"
-                : "redMean=" + result.stats.red_mean +
-                  " | redRange=" + result.stats.red_range +
-                  " | irMean=" + result.stats.ir_mean +
-                  " | irRange=" + result.stats.ir_range +
-                  " | redMin=" + result.stats.red_min +
-                  " | redMax=" + result.stats.red_max +
-                  " | irMin=" + result.stats.ir_min +
-                  " | irMax=" + result.stats.ir_max +
-                  " | redClips=" + result.stats.red_clips +
-                  " | irClips=" + result.stats.ir_clips +
-                  " | acquisitionGap=" + result.stats.gap +
-                  " | minMean=" + result.stats.limit_mean +
-                  " | minRange=" + result.stats.limit_range;
+            // Firmware sends only sqi.g1/reason/samples. Compute local,
+            // non-authoritative statistics from RAW frames Unity received.
+            LastG1ShadowSummary = rawG1Probe.Summarize(deviceMs,
+                lastGate01Samples);
+            string stats = LastG1ShadowSummary.ToDiagnosticString();
 
             bool approved = result.sqi.g1 && result.sqi.reason == 0 &&
                 result.sqi.samples >= Gate01MinimumSamples;
@@ -461,6 +449,12 @@ namespace Ibit.Core.Oximetry
             }
 
             receivedSampleFrames++;
+
+            // Capture EVERY delivered RED/IR pair before contact/G1 filtering.
+            // This history is independent of the 8s processing buffer, so a
+            // rejected G1 can still be diagnosed without firmware changes.
+            rawG1Probe.Observe(frame.seq, frame.t_ms, frame.ppg.red,
+                frame.ppg.ir, frame.sqi != null && frame.sqi.contact);
 
             // Contact is a sample-level observation, independent of G1.
             // Missing SQI is a protocol error, not evidence of finger-off.
