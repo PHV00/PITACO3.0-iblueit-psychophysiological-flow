@@ -246,6 +246,15 @@ public class PpgProcessingTests
                 Assert.IsTrue(coordinator.HudMeasurement.SpO2DemoPercent.HasValue);
             }
 
+            // A held HUD number has a 2-second freshness cap even if contact
+            // confirmation and the G1 PASS have not changed.
+            var lastHudTime = typeof(PpgProcessingCoordinator).GetField(
+                "lastHudValidAt", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(lastHudTime);
+            lastHudTime.SetValue(coordinator, Time.unscaledTime - 3f);
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
+            Assert.IsFalse(coordinator.HudMeasurement.BpmEstimate.HasValue);
+
             // Third consecutive failure confirms removal and clears the window.
             receive.Invoke(coordinator, new object[]
             {
