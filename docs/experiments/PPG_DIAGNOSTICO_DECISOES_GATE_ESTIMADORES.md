@@ -10,7 +10,7 @@
 2. Executar o jogo usando o firmware gravado a partir da branch de diagnóstico. **A troca de branch de código, sozinha, não atualiza o ESP32.** O firmware antigo continua funcional, mas o campo `metrics=UNAVAILABLE_OLD_FIRMWARE` indicará a ausência das métricas novas.
 3. Fazer ensaio controlado de 90–120 s com contato estável, sem dessaturação provocada. Anotar quando ocorrem movimentação, variação de pressão e retirada/reposição do dedo. Não registrar dados pessoais.
 4. Salvar logs completos do Console e CSV bruto do monitor Python, de preferência em execuções separadas da COM USB. Uma captura Python/BLE concorrente só é válida se não houver disputa pelo dispositivo/fluxo.
-5. Combinar registros pelo `devMs`, `window` e `seq`; `t` no Console é relógio Unity e não deve ser confundido com `t_ms` do ESP32.
+5. Combinar registros pelo `devMs`, `window` e `seq` **somente se forem da mesma sessão efetiva do firmware**. Se Unity e Python capturarem ensaios separados, comparar distribuições e causas agregadas, nunca alinhar janelas 1:1. `t` no Console é relógio Unity e não deve ser confundido com `t_ms` do ESP32.
 
 ## Eventos [PPG-DIAG] e o que demonstram
 
