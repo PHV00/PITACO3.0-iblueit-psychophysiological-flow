@@ -84,6 +84,12 @@ namespace Ibit.Core.Oximetry.UI
             }
 
             string playerText = ReadPlayerText(true);
+            if (coordinator.HudHoldingShortContactGap &&
+                !string.IsNullOrEmpty(playerText))
+            {
+                // A briefly retained reading is NOT a new PPG estimate.
+                playerText += "\nPPG: contato instavel (ultima leitura)";
+            }
             SetText(playerText ?? ConnectedPrefix + "PPG: aguardando Player");
         }
 
