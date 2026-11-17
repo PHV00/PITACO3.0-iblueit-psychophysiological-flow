@@ -256,3 +256,44 @@ registrar causas granulares de invalidação/publicação em cada
 janela e comparar timestamps de `Player`, `Bridge`,
 G1 e detector de contato; usar isso antes de reduzir
 limiares ou relaxar o G1.
+
+
+## Execução 3 — HUD com tolerância a até duas falhas consecutivas de contato
+
+Nesta revisão a tolerância de contato da exibição foi alinhada à
+política de **três amostras falsas consecutivas** que já protege o
+`PpgSampleBuffer`. O ajuste está restrito às três cenas do jogo:
+`Plataform`, `WaterGame` e `CakeGame`.
+
+**Duas interfaces distintas no coordenador:**
+
+- `LastMeasurement`: permanece a leitura corrente do processamento.
+  **Continua invalidada imediatamente** no primeiro frame sem
+  contato; o `OximetryDataBridge`, o `MixerManager` e a
+  `MixerAdaptationGrid` continuam consumindo essa interface.
+- `HudMeasurement`: exibe a **última leitura previamente calculada**
+  durante a primeira e a segunda falha consecutiva, se ela for
+  recente (até 2 s), houver contato anteriormente confirmado e
+  o G1 continuar aprovado. A HUD mostra ainda
+  `PPG: contato instavel (ultima leitura)`. A retenção é
+  **somente visual**, nunca um novo cálculo de BPM/SpO2.
+
+**Invalidação imediata da retenção visual** quando houver três
+falhas seguidas, G1 rejeitado/expirado, reinicialização de
+janela/sequência, amostra inválida, falha de processamento ou
+limite temporal excedido. Se não existiu uma leitura válida anterior,
+os traços `--` permanecem.
+
+**Atenção:** a recuperação de contato não garante que a SpO2
+permaneça disponível. Uma janela com lacunas reconstruídas continua
+vetada pelo `Spo2Estimator`; se o processamento gerar
+`SpO2DemoPercent=null`, a HUD exibirá `--` no canal SpO2.
+A alteração não relaxa o SQI G1, nem os critérios de estimativa.
+
+**Teste de regressão escrito em**
+`Assets/_Game/Scripts/Editor/Unit Tests/PpgProcessingTests.cs`:
+verificar 1/2 e 2/2 falhas (HUD mantém, `LastMeasurement` nulo),
+3/3 falhas (ambos nulos) e falha G1 durante retenção
+(limpa imediatamente). Executar esses testes no Unity Test Runner
+(Edit Mode) e repetir o teste real na Unity HUD; nenhum resultado
+de execução Unity/hardware foi registrado nesta revisão.
