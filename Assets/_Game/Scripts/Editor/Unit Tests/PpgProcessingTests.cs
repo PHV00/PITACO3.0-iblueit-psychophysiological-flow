@@ -404,6 +404,33 @@ public class PpgProcessingTests
     }
 
     [Test]
+    public void OptionalFirmwareG1StatisticsDoNotChangePassFailContract()
+    {
+        var gameObject = new GameObject("G1 optional stats contract");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            ReceiveG1TestJson(coordinator,
+                "{\"type\":\"g1\",\"t_ms\":5000,\"window\":1," +
+                "\"sqi\":{\"g1\":false,\"reason\":4,\"samples\":125}," +
+                "\"stats\":{\"red_min\":100000,\"red_max\":100477," +
+                "\"red_mean\":100238,\"red_range\":477," +
+                "\"ir_min\":110000,\"ir_max\":111000," +
+                "\"ir_mean\":110500,\"ir_range\":1000," +
+                "\"red_clips\":0,\"ir_clips\":0,\"gap\":false," +
+                "\"limit_mean\":5000,\"limit_range\":500}}");
+            Assert.AreEqual("Failed", coordinator.Gate01Status);
+            Assert.AreEqual(4, coordinator.LastGate01Reason);
+            Assert.AreEqual(125, coordinator.LastGate01Samples);
+            // An older firmware without stats still uses the same G1 contract.
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, true, 0));
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+            Assert.AreEqual(0, coordinator.LastGate01Reason);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
     public void Gate01WaitingBlocksEstimatesDespiteEightSecondsOfPulses()
     {
         var gameObject = new GameObject("PPG G1 pending test");
