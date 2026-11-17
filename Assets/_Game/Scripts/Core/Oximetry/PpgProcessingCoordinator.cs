@@ -276,9 +276,10 @@ namespace Ibit.Core.Oximetry
 
         // Every new outcome is logged immediately; repeated identical outcomes
         // are sampled every two seconds to preserve metrics without flooding.
-        private void TraceCalculation(string decision, string detail)
+        private void TraceCalculation(string decision, string detail,
+            bool everyCall = false)
         {
-            if (decision == lastCalculationDecision &&
+            if (!everyCall && decision == lastCalculationDecision &&
                 Time.unscaledTime < nextCalculationTraceAt)
                 return;
             lastCalculationDecision = decision;
@@ -647,7 +648,8 @@ namespace Ibit.Core.Oximetry
                 " | bpm=" + (hasBpm ? bpm.ToString("F1") : "--") +
                 " | spo2Reason=" + spo2Reason +
                 " | ratioR=" + ratio.ToString("F4") +
-                " | spo2Demo=" + (hasSpO2 ? spo2Demo.ToString("F1") : "--"));
+                " | spo2Demo=" + (hasSpO2 ? spo2Demo.ToString("F1") : "--"),
+                true); // Audit every actual 400-ms estimator calculation.
             LastMeasurement = new PpgMeasurement(sample.TimeMs, processed.SamplingHz,
                 hasBpm ? (double?)bpm : null,
                 hasSpO2 ? (double?)spo2Demo : null,
