@@ -27,7 +27,7 @@ public class DeepDDAAgent : Agent
 {
     // Diagnostic PPG branch: suppress repetitive action narration only.
     // Keep all actions, rewards and warnings unchanged.
-    private const bool LogVerboseDdaActions = false;
+    private static readonly bool LogVerboseDdaActions = false;
     public static DeepDDAAgent instance;
     [SerializeField] private StageManager stage;
     [SerializeField] private Scorer scr;
