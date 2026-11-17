@@ -30,8 +30,35 @@ namespace Ibit.Core.Game
         [SerializeField] private CanvasManager _canvasManager;
         [SerializeField] private Spawner _spawner;
 
+        // TEST BRANCH ONLY: the existing configuration selects profile P for
+        // PITACO 2.4 with an integrated optical sensor. Profile P has 0/0
+        // saturation thresholds. Match only the SpO2 thresholds of the PO
+        // test profile without changing any other P gameplay parameter.
+        // These are functional DEMO thresholds, NOT validated clinical limits.
+        private const int Pitaco24TestMinimumNormalOxygenation = 95;
+        private const int Pitaco24TestMinimumRegularOxygenation = 89;
+
+        private static bool UsePitaco24TestOxygenationThresholds(OximetrySnapshot snapshot)
+        {
+            return snapshot.Source == OximetrySource.Pitaco24;
+        }
+
+        private static int MinimumRegularOxygenationFor(OximetrySnapshot snapshot)
+        {
+            return UsePitaco24TestOxygenationThresholds(snapshot)
+                ? Pitaco24TestMinimumRegularOxygenation
+                : ParametersDb.parameters.MinimumRegularOxygenation;
+        }
+
+        private static int MinimumNormalOxygenationFor(OximetrySnapshot snapshot)
+        {
+            return UsePitaco24TestOxygenationThresholds(snapshot)
+                ? Pitaco24TestMinimumNormalOxygenation
+                : ParametersDb.parameters.MinimumNormalOxygenation;
+        }
+
         // Logging for functional integration only. Enabled in this test branch;
-        // no extra serial traffic and no changes to SpO2 decision thresholds.
+        // no extra serial traffic and no changes to legacy oximeter thresholds.
         [SerializeField] private bool logSpo2AdaptationTest = true;
         private bool? lastSpo2EligibleForTest;
         private float nextNoTargetsDiagnosticAt;
@@ -61,8 +88,10 @@ namespace Ibit.Core.Game
                 " | contato=" + snapshot.OpticalContactConfirmed +
                 " | G1=" + snapshot.BasicSignalQualityApproved +
                 " | age=" + snapshot.AgeSeconds.ToString("F1") + "s" +
-                " | limiarRegular=" + ParametersDb.parameters.MinimumRegularOxygenation +
-                " | limiarNormal=" + ParametersDb.parameters.MinimumNormalOxygenation +
+                " | perfilLimiar=" + (UsePitaco24TestOxygenationThresholds(snapshot)
+                    ? "Pitaco24Test" : "LegadoConfig") +
+                " | limiarRegular=" + MinimumRegularOxygenationFor(snapshot) +
+                " | limiarNormal=" + MinimumNormalOxygenationFor(snapshot) +
                 " | contadorRegular=" + countSPORegular + "/" + limitSPORegular +
                 " | contadorPerigo=" + countSPODanger + "/" + limitSPODanger +
                 " | painel1Executado=" + SecurityPanelOneExecuted +
@@ -120,7 +149,9 @@ namespace Ibit.Core.Game
             else if (Time.time > currenttimeOxi + timeBetweenSamplesOxi)
             {
                 float signalOxiSPO = (float)oximetry.SpO2Percent.Value;
-                if (signalOxiSPO >= ParametersDb.parameters.MinimumRegularOxygenation && signalOxiSPO < ParametersDb.parameters.MinimumNormalOxygenation) // 85 até 94%    
+                int minimumRegular = MinimumRegularOxygenationFor(oximetry);
+                int minimumNormal = MinimumNormalOxygenationFor(oximetry);
+                if (signalOxiSPO >= minimumRegular && signalOxiSPO < minimumNormal) // Faixa regular de teste PITACO 2.4: 89 <= SpO2 < 95    
                 {
                     if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem
                     {
@@ -153,7 +184,7 @@ namespace Ibit.Core.Game
 
                     }
                 } else {
-                    if (signalOxiSPO > 0 && signalOxiSPO < ParametersDb.parameters.MinimumRegularOxygenation)
+                    if (signalOxiSPO > 0 && signalOxiSPO < minimumRegular)
                     {
                         if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem
                         {
