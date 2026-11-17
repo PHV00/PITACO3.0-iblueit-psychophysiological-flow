@@ -224,8 +224,10 @@ public class PpgProcessingTests
             Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue);
             Assert.IsTrue(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
 
-            // The first two contact failures quarantine the raw samples:
-            // they suspend old numbers but preserve G1 and the 8-second buffer.
+            // The first two contact failures quarantine raw samples.
+            // LastMeasurement stays unavailable to the Mixer, but the
+            // short-gap HUD view retains only the previous real reading.
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
             for (int i = 420; i < 422; i++)
             {
                 receive.Invoke(coordinator, new object[]
@@ -239,6 +241,9 @@ public class PpgProcessingTests
                 Assert.AreEqual("Passed", coordinator.Gate01Status);
                 Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
                 Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+                Assert.IsTrue(coordinator.HudHoldingShortContactGap);
+                Assert.IsTrue(coordinator.HudMeasurement.BpmEstimate.HasValue);
+                Assert.IsTrue(coordinator.HudMeasurement.SpO2DemoPercent.HasValue);
             }
 
             // Third consecutive failure confirms removal and clears the window.
@@ -252,12 +257,47 @@ public class PpgProcessingTests
             Assert.AreEqual("Waiting", coordinator.Gate01Status);
             Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
             Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
+            Assert.IsFalse(coordinator.HudMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.HudMeasurement.SpO2DemoPercent.HasValue);
             Assert.AreEqual(423, contactEvents);
         }
         finally
         {
             UnityEngine.Object.DestroyImmediate(gameObject);
         }
+    }
+
+    [Test]
+    public void FailedG1AlsoRevokesHudShortContactHoldImmediately()
+    {
+        var gameObject = new GameObject("PPG short-gap HUD G1 failure test");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 250; i++)
+            {
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+                if (i == 125)
+                    ReceiveG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0));
+            }
+
+            Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(250, false));
+            Assert.IsTrue(coordinator.HudHoldingShortContactGap);
+            Assert.IsTrue(coordinator.HudMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+
+            // The next G1 decision is a failure while still in the
+            // two-sample grace period: previous display data is revoked.
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, false, 4));
+            Assert.AreEqual("Failed", coordinator.Gate01Status);
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
+            Assert.IsFalse(coordinator.HudMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
     }
 
     // Gate 01 is calculated by the ESP32; the Unity coordinator only accepts
