@@ -42,6 +42,69 @@ public class PpgProcessingTests
     }
 
     [Test]
+    public void DetailedEstimatorDiagnosticsPreserveSuccessfulEstimates()
+    {
+        PpgProcessedWindow processed;
+        string reason;
+        Assert.IsTrue(PpgSignalProcessor.TryProcess(MakeWave(75),
+            out processed, out reason), reason);
+
+        double bpmOriginal, corrOriginal, bpmDetailed, corrDetailed, lag;
+        string bpmReason;
+        Assert.IsTrue(BpmEstimator.TryEstimate(processed, out bpmOriginal,
+            out corrOriginal));
+        Assert.IsTrue(BpmEstimator.TryEstimateDetailed(processed,
+            out bpmDetailed, out corrDetailed, out lag, out bpmReason));
+        Assert.AreEqual("OK", bpmReason);
+        Assert.Greater(lag, 0);
+        Assert.AreEqual(bpmOriginal, bpmDetailed, 1e-9);
+        Assert.AreEqual(corrOriginal, corrDetailed, 1e-9);
+
+        double spoOriginal, rOriginal, spoDetailed, rDetailed;
+        string spoReason;
+        Assert.IsTrue(Spo2Estimator.TryEstimateDemo(processed,
+            out spoOriginal, out rOriginal));
+        Assert.IsTrue(Spo2Estimator.TryEstimateDemoDetailed(processed,
+            out spoDetailed, out rDetailed, out spoReason));
+        Assert.AreEqual("OK", spoReason);
+        Assert.AreEqual(spoOriginal, spoDetailed, 1e-9);
+        Assert.AreEqual(rOriginal, rDetailed, 1e-9);
+    }
+
+    [Test]
+    public void DetailedEstimatorDiagnosticsExplainNullMeasurements()
+    {
+        var constant = new List<PpgSample>();
+        for (int i = 0; i < 210; i++)
+            constant.Add(new PpgSample((ushort)i, (uint)(i * 40),
+                60000, 80000));
+        PpgProcessedWindow processed;
+        string reason;
+        Assert.IsTrue(PpgSignalProcessor.TryProcess(constant,
+            out processed, out reason), reason);
+        double bpm, corr, lag, spo, ratio;
+        string bpmReason, spoReason;
+        Assert.IsFalse(BpmEstimator.TryEstimateDetailed(processed,
+            out bpm, out corr, out lag, out bpmReason));
+        Assert.AreEqual("AUTOCORR_BELOW_0_57", bpmReason);
+        Assert.IsFalse(Spo2Estimator.TryEstimateDemoDetailed(processed,
+            out spo, out ratio, out spoReason));
+        Assert.AreEqual("AC_RMS_TOO_LOW", spoReason);
+
+        var withContactGap = MakeWave(75);
+        withContactGap.RemoveAt(140);
+        var s = withContactGap[140];
+        withContactGap[140] = new PpgSample(s.Sequence, s.TimeMs,
+            s.Red, s.Ir, 1);
+        Assert.IsTrue(PpgSignalProcessor.TryProcess(withContactGap,
+            out processed, out reason), reason);
+        Assert.AreEqual(1, processed.ReconstructedSamples);
+        Assert.IsFalse(Spo2Estimator.TryEstimateDemoDetailed(processed,
+            out spo, out ratio, out spoReason));
+        Assert.AreEqual("RECONSTRUCTED_PPG_GAP", spoReason);
+    }
+
+    [Test]
     public void RepeatedFifoReadTimestampsDoNotInvalidateSequentialSamples()
     {
         PpgProcessedWindow processed;
