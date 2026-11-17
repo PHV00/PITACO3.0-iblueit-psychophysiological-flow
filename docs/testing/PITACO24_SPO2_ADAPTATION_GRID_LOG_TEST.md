@@ -107,3 +107,76 @@ além de verificar que não há ações após perda de elegibilidade.
 Esta branch **não representa um novo marco** e não altera a `main`.
 Só após conferir o log e as evidências do jogo deve-se planejar
 o próximo marco.
+
+
+## Execução 1 — resultado real recebido (17/11/2026)
+
+**Veredito:** integração comprovada; teste de classificação por saturação e
+painéis **inconclusivo devido a configuração**. Não criar novo marco ainda.
+
+### Evidências de funcionamento
+
+- `[PITACO Manager]`: Pitaco24 conectado por COM3 exclusiva; filas sem
+  descartes nos relatórios disponíveis.
+- Diagnóstico final enviado: `JSON serial=3393`, `callbacks=3393`,
+  `samples=3369`, `JSON invalido=0`, `amostraInvalida=0`.
+- `G1=Passed` e `G1_reason=0` liberaram SpO2 DEMO e, em parte do tempo,
+  BPM. O Bridge confirmou `legacyRules=True` e `mixer=RECEBIDO`.
+- `[SpO2Grid-Test]` registrou `ESTADO_ELEGIVEL` e
+  `AMOSTRA_NORMAL_RECOMPENSA_SOLICITADA`; `AddReward(+0,1)` chamou
+  `DeepDDAAgent.AddReward` (`RECOMPENSA_APLICADA_0,1`).
+- Transições `ESTADO_INELEGIVEL` surgiram quando os dados ficaram ausentes,
+  seja por perda de contato, reprovação G1 ou inexistência de SpO2.
+- Cadência medida: `intervaloAvaliacao=6,0s`, correspondendo à
+  leitura de 10 avaliações por minuto definida pela configuração do oxímetro.
+- `painel1Executado=False`, `painel2Executado=False`, contadores `0/2`
+  em todos os registros mostrados; **não há evidência de painel disparado**.
+
+### Causa de configuração identificada no código
+
+O log registra `Dispositivo(s): P`. Em
+`Assets/_Game/Scripts/Core/Database/ParametersDb.cs`, a combinação
+é selecionada pelos controladores legados: um PITACO conectado, sem
+`SerialControllerOximetro` separado, corresponde a `P`. O sensor óptico
+integrado ao PITACO 2.4 não transforma essa combinação em `PO`.
+
+No arquivo `Config/_parametersList.csv`, seção ADAPTACAO:
+
+| Linha | Oxigenacao Normal Minima | Oxigenacao Regular Minima |
+| --- | ---: | ---: |
+| `P` | **0** | **0** |
+| `PO` | **95** | **89** |
+
+No `MixerAdaptationGrid.cs`, faixa regular exige
+`SpO2 >= MinimumRegularOxygenation && SpO2 < MinimumNormalOxygenation`;
+perigo exige `SpO2 > 0 && SpO2 < MinimumRegularOxygenation`.
+Com ambos os limites iguais a zero, todas as leituras positivas avaliadas
+caem no ramo **normal**, recebendo `+0,1`: o comportamento observado
+é consequência direta dos parâmetros carregados, não comprova
+classificação fisiológica correta.
+
+**Não substituir globalmente a combinação `P` por `PO`**: isso
+também alteraria parâmetros de gameplay alheios à SpO2 (velocidade,
+fatores de adaptação etc.). O próximo experimento precisa de um mecanismo
+isolado e explícito para carregar limiares de oxigenação quando a
+fonte é PITACO 2.4, preservando o restante dos parâmetros de `P`.
+Para teste funcional de bancada podem ser usados os limiares de
+referência já presentes na configuração `PO`: 95 e 89; não presumir
+que tais valores ou a SpO2 DEMO estejam clinicamente validados.
+
+### Pendências e cuidados
+
+1. Instrumentar ou configurar os **limiares de SpO2 isoladamente**, então
+   repetir o teste com entradas sintéticas e cenário seguro para exercitar
+   `AMOSTRA_REGULAR`, `AMOSTRA_PERIGO`, `PAINEL_1_ATIVADO` e
+   `PAINEL_2_ATIVADO`. Não provocar dessaturação real.
+2. Validar que contadores zeram ao perder elegibilidade e que a cadência
+   não aciona ações inesperadas após `G1=Failed`.
+3. Documentar e corrigir, em etapa separada, os avisos repetidos
+   `Tentando acessar um objeto Target que foi destruído` e os 3 avisos
+   `The referenced script (Unknown) ... is missing!`.
+4. `Couldn't connect to trainer ... Will perform inference instead` é
+   esperado em execução com ONNX sem trainer externo.
+
+Este relatório registra apenas evidências vistas no log recebido e no
+código/configuração da branch; **não indica precisão clínica**.
