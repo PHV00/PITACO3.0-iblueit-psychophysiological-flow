@@ -122,6 +122,13 @@ namespace Ibit.Core.Oximetry
         private const float Gate01MaxAgeSeconds = 6.5f;
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
+        // HUD-only hold: protects against a 1-2-sample contact flicker, not
+        // against G1 failure, stale telemetry or a rejected PPG calculation.
+        // The Bridge/Mixer MUST continue reading LastMeasurement (not this).
+        private const float HudShortContactHoldMaxAgeSeconds = 2f;
+        private PpgMeasurement lastHudValidMeasurement;
+        private float lastHudValidAt = -1f;
+        private bool hudShortContactGapActive;
         private int consecutiveNoContactSamples;
         private int pendingShortContactGaps;
         private long toleratedShortContactGaps;
@@ -145,6 +152,18 @@ namespace Ibit.Core.Oximetry
             Time.unscaledTime - lastGate01ArrivalAt <= Gate01MaxAgeSeconds;
 
         public PpgMeasurement LastMeasurement { get; private set; }
+
+        // Visually keep the last fresh PPG estimate through at most two
+        // consecutive false-contact frames. No held value enters the Mixer.
+        public bool HudHoldingShortContactGap =>
+            hudShortContactGapActive && consecutiveNoContactSamples < ContactLossConfirmationSamples &&
+            OpticalContactConfirmed && Gate01Approved &&
+            lastHudValidMeasurement != null && lastHudValidAt >= 0f &&
+            Time.unscaledTime - lastHudValidAt <= HudShortContactHoldMaxAgeSeconds;
+
+        public PpgMeasurement HudMeasurement =>
+            HudHoldingShortContactGap ? lastHudValidMeasurement : LastMeasurement;
+
         public bool OpticalContactConfirmed { get; private set; }
         // Distinguish JSON-looking frames, callbacks, recognized sample frames
         // and actual valid PPG. These counters do not change the signal path.
@@ -246,8 +265,16 @@ namespace Ibit.Core.Oximetry
             ResetMeasurements("PITACO 2.4 desconectado");
         }
 
+        private void ClearHudContactHold()
+        {
+            hudShortContactGapActive = false;
+            lastHudValidMeasurement = null;
+            lastHudValidAt = -1f;
+        }
+
         private void InvalidatePpgWindow(string status)
         {
+            ClearHudContactHold();
             buffer.Clear();
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
@@ -276,6 +303,7 @@ namespace Ibit.Core.Oximetry
         private void MarkGate01Stale()
         {
             if (gate01State != Gate01State.Passed) return;
+            ClearHudContactHold();
             gate01State = Gate01State.Stale;
             // Suspend publication but retain collected samples until next G1
             // decision; no stale measurement may remain visible in the HUD.
@@ -417,6 +445,12 @@ namespace Ibit.Core.Oximetry
                 // samples but never adding suspicious RED/IR to the buffer.
                 if (OpticalContactConfirmed)
                 {
+                    // Keep the last genuinely published estimate for DISPLAY
+                    // only. A fresh G1, contact and a 2-second age limit are
+                    // still required; the normal measurement is invalidated.
+                    if (consecutiveNoContactSamples == 1)
+                        hudShortContactGapActive = lastHudValidMeasurement != null &&
+                            object.ReferenceEquals(LastMeasurement, lastHudValidMeasurement);
                     ++pendingShortContactGaps;
                     LastMeasurement = new PpgMeasurement(0, 0, null, null,
                         null, 0, "Contato optico instavel (" +
@@ -445,6 +479,7 @@ namespace Ibit.Core.Oximetry
             if (!PpgSample.TryCreate(frame.seq, frame.t_ms,
                 frame.ppg.red, frame.ppg.ir, out sample))
             {
+                ClearHudContactHold();
                 invalidSampleFrames++;
                 LastMeasurement = new PpgMeasurement(0, 0, null, null,
                     null, 0, "Amostra PPG invalida: seq/t_ms/RED/IR");
@@ -462,6 +497,7 @@ namespace Ibit.Core.Oximetry
             lastSampleReceivedAt = Time.unscaledTime;
             if (!continuous)
             {
+                ClearHudContactHold();
                 hasPreviousProcessingTime = false;
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, "Janela reiniciada: sequencia/timestamp");
@@ -469,6 +505,7 @@ namespace Ibit.Core.Oximetry
 
             if (!IsGate01ApprovedForSample(sample.TimeMs))
             {
+                ClearHudContactHold();
                 blockedByGate01++;
                 string gateBlockReason = gate01State == Gate01State.Waiting
                     ? "Aguardando aprovacao G1"
@@ -488,6 +525,7 @@ namespace Ibit.Core.Oximetry
             string reason;
             if (!PpgSignalProcessor.TryProcess(buffer.Samples, out processed, out reason))
             {
+                ClearHudContactHold();
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, reason);
                 return;
@@ -505,6 +543,15 @@ namespace Ibit.Core.Oximetry
                 autocorrelation, processed.ReconstructedSamples > 0
                     ? "EXPERIMENTAL - BPM com lacunas reconstruidas; SpO2 bloqueada"
                     : "EXPERIMENTAL - NAO CALIBRADO");
+            // Release a display hold once the processor reaches a new verdict.
+            // A rejected SpO2 remains "--"; we never invent a fresh reading.
+            ClearHudContactHold();
+            if (LastMeasurement.BpmEstimate.HasValue ||
+                LastMeasurement.SpO2DemoPercent.HasValue)
+            {
+                lastHudValidMeasurement = LastMeasurement;
+                lastHudValidAt = Time.unscaledTime;
+            }
             OnMeasurement?.Invoke(LastMeasurement);
 
 
