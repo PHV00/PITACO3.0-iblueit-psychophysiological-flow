@@ -13,11 +13,24 @@ namespace Ibit.Core.Oximetry
         private const double MinimumAutocorrelation = 0.57;
         private const double PeakTolerance = 0.075;
 
+        // Diagnostic overload preserves the existing API and calculations.
         public static bool TryEstimate(PpgProcessedWindow input,
             out double bpm, out double correlationPeak)
         {
+            string reason;
+            double lag;
+            return TryEstimateDetailed(input, out bpm, out correlationPeak,
+                out lag, out reason);
+        }
+
+        public static bool TryEstimateDetailed(PpgProcessedWindow input,
+            out double bpm, out double correlationPeak,
+            out double selectedLag, out string reason)
+        {
             bpm = 0.0;
             correlationPeak = 0.0;
+            selectedLag = 0.0;
+            reason = "INPUT_IR_AC_INSUFFICIENT";
             if (input == null || input.IrAc == null || input.IrAc.Length < 70)
                 return false;
 
@@ -32,7 +45,7 @@ namespace Ibit.Core.Oximetry
 
             int minLag = Math.Max(2, (int)(input.SamplingHz * 60.0 / MaximumBpm));
             int maxLag = Math.Min(n / 3, (int)(input.SamplingHz * 60.0 / MinimumBpm) + 1);
-            if (minLag > maxLag) return false;
+            if (minLag > maxLag) { reason = "LAG_RANGE_INVALID"; return false; }
 
             var scores = new double[maxLag + 2];
             for (int lag = minLag; lag <= maxLag; lag++)
@@ -49,7 +62,11 @@ namespace Ibit.Core.Oximetry
                 scores[lag] = denominator > 0.0 ? cross / denominator : 0.0;
                 correlationPeak = Math.Max(correlationPeak, scores[lag]);
             }
-            if (correlationPeak < MinimumAutocorrelation) return false;
+            if (correlationPeak < MinimumAutocorrelation)
+            {
+                reason = "AUTOCORR_BELOW_0_57";
+                return false;
+            }
 
             int chosenLag = -1;
             for (int lag = minLag; lag <= maxLag; lag++)
@@ -63,7 +80,7 @@ namespace Ibit.Core.Oximetry
                     break;
                 }
             }
-            if (chosenLag < 0) return false;
+            if (chosenLag < 0) { reason = "PEAK_NOT_FOUND"; return false; }
 
             double refinedLag = chosenLag;
             if (chosenLag > minLag && chosenLag < maxLag)
@@ -82,8 +99,13 @@ namespace Ibit.Core.Oximetry
             double estimate = 60.0 * input.SamplingHz / refinedLag;
             if (estimate < MinimumBpm || estimate > MaximumBpm ||
                 double.IsNaN(estimate) || double.IsInfinity(estimate))
+            {
+                reason = "BPM_OUT_OF_RANGE";
                 return false;
+            }
 
+            selectedLag = refinedLag;
+            reason = "OK";
             bpm = Math.Round(estimate, 1);
             return true;
         }
