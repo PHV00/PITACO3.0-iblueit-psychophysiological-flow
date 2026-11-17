@@ -78,6 +78,13 @@ namespace Ibit.Core.Game
         {
             if (!logSpo2AdaptationTest)
                 return;
+            // The quality investigation keeps state changes, RED/DANGER
+            // evaluations, panels and nonzero alert rewards, not the routine
+            // normal-range +0.1 reward printed every six seconds.
+            if (eventName == "AMOSTRA_NORMAL_RECOMPENSA_SOLICITADA" ||
+                eventName.StartsWith("RECOMPENSA_APLICADA_0,1") ||
+                eventName.StartsWith("RECOMPENSA_APLICADA_0.1"))
+                return;
 
             Debug.Log("[SpO2Grid-Test] event=" + eventName +
                 " | source=" + snapshot.Source +
