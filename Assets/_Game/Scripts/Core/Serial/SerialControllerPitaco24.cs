@@ -41,7 +41,7 @@ namespace Ibit.Core.Serial
         [SerializeField] private bool startSamplingOnConnect = true;
         // Progress counters are now summarized by PpgProcessingCoordinator.
         // Keep connection/error messages, suppress JSON:100/200/... noise.
-        private const bool EnableVerboseJsonProgress = false;
+        private static readonly bool EnableVerboseJsonProgress = false;
         [SerializeField] private int logEveryNJsonMessages = 100;
 
         private SerialThreadPitaco24 serialThread;
