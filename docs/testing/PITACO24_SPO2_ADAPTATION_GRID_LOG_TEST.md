@@ -2,7 +2,7 @@
 
 **Branch isolada:** `test/pitaco24-spo2-adaptation-grid-logs`  
 **Base:** `feature/ppg-csharp-bpm-spo2-mvp`  
-**Status:** instrumentação preparada; execução e validação ainda pendentes.
+**Status atual:** execução funcional observada e Marco 2 fechado documentalmente; validação metrológica/clínica, Test Runner e regressões PlayMode seguem pendentes. Ver seção Execução 4.
 
 ## Escopo e hipótese
 
@@ -297,3 +297,22 @@ verificar 1/2 e 2/2 falhas (HUD mantém, `LastMeasurement` nulo),
 (limpa imediatamente). Executar esses testes no Unity Test Runner
 (Edit Mode) e repetir o teste real na Unity HUD; nenhum resultado
 de execução Unity/hardware foi registrado nesta revisão.
+
+
+## Execução 4 — aceite documental do Marco 2 (17/11/2026)
+
+**Resultado observado nos logs enviados pelo usuario:** a instrumentacao da branch de teste comprovou o encadeamento ate a execucao dos caminhos de painel/recompensa no codigo; encerramento **funcional experimental**, sem reivindicacao clinica.
+
+- Conexao `Pitaco24` na `COM3`; nas mensagens mostradas, `descartes da fila: 0`.
+- Diagnostico final exibido: `JSON serial=3852`, `callbacks=3852`, `samples=3825`, `JSON invalido=0`, `amostraInvalida=0`; `lacunasContatoToleradas=4` e `perdasContatoConfirmadas=2`.
+- `mixer=RECEBIDO`, `source=Pitaco24`, valores BPM/SpO2 DEMO numericos em periodos aprovados e `mixerReads` crescente.
+- `perfilLimiar=Pitaco24Test`, `limiarRegular=89`, `limiarNormal=95` e intervalo de avaliacao de 6,0s.
+- `AMOSTRA_PERIGO 2/2` -> `RECOMPENSA_APLICADA_-2,0` -> `PAINEL_2_ATIVADO_PAUSA_RECOMPENSA_SOLICITADA` (~49,1 s).
+- `AMOSTRA_REGULAR 2/2` -> `RECOMPENSA_APLICADA_-1,0` -> `PAINEL_1_ATIVADO_PAUSA_RECOMPENSA_SOLICITADA` (~84,2 s).
+- Amostras normais geraram `RECOMPENSA_APLICADA_0,1`; estado inelegivel foi registrado ao perder validacao.
+- `G1=Failed` com `reason=2` ou `reason=4` e `contato=True` em alguns trechos; `BPM=--` e `SpO2 DEMO=--` persistem mesmo com amostras chegando.
+- Avisos independentes: `More observations (16) made than vector observation size (1)`, scripts ausentes e `Target` destruido.
+
+**Limite do aceite:** eventos indicam o caminho de codigo executado, sem captura visual comprovatoria do painel/pausa. Inferencia do agente foi observada, mas aviso de truncamento das 16 observacoes exige investigacao. Os numeros de SpO2 DEMO oscilam e nao foram validados com referencia independente.
+
+**Fechamento e proximos passos:** `docs/marcos/MARCO_02_INTEGRACAO_PITACO24_MIXER_DEEPDDA_FECHAMENTO.md` consolida o fechamento limitado do Marco 2. A validacao da qualidade optica RED/IR, a avaliacao do G1 e a estabilidade dos estimadores passam ao Marco 3. **Nenhum codigo de aquisicao, G1, estimadores ou ML-Agents e modificado por este registro.**
