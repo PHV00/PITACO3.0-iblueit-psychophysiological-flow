@@ -404,30 +404,93 @@ public class PpgProcessingTests
     }
 
     [Test]
-    public void OptionalFirmwareG1StatisticsDoNotChangePassFailContract()
+    public void UnityDiagnosesOriginalG1JsonWithoutChangingFirmwareVerdict()
     {
-        var gameObject = new GameObject("G1 optional stats contract");
+        var gameObject = new GameObject("G1 original firmware JSON test");
         try
         {
             var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
-            ReceiveG1TestJson(coordinator,
-                "{\"type\":\"g1\",\"t_ms\":5000,\"window\":1," +
-                "\"sqi\":{\"g1\":false,\"reason\":4,\"samples\":125}," +
-                "\"stats\":{\"red_min\":100000,\"red_max\":100477," +
-                "\"red_mean\":100238,\"red_range\":477," +
-                "\"ir_min\":110000,\"ir_max\":111000," +
-                "\"ir_mean\":110500,\"ir_range\":1000," +
-                "\"red_clips\":0,\"ir_clips\":0,\"gap\":false," +
-                "\"limit_mean\":5000,\"limit_range\":500}}");
+            for (int i = 0; i < 125; i++)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+            // Important: original firmware frame has NO optional stats object.
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(5000, false, 4));
             Assert.AreEqual("Failed", coordinator.Gate01Status);
             Assert.AreEqual(4, coordinator.LastGate01Reason);
             Assert.AreEqual(125, coordinator.LastGate01Samples);
-            // An older firmware without stats still uses the same G1 contract.
+            var observed = coordinator.LastG1ShadowSummary;
+            Assert.IsNotNull(observed);
+            Assert.AreEqual(125, observed.FirmwareReportedSamples);
+            Assert.AreEqual(125, observed.ObservedSamples);
+            Assert.IsTrue(observed.CountAndSequenceCovered);
+            Assert.Greater(observed.RedRange, 500,
+                "Locally adequate amplitude MUST NOT override firmware reason=4.");
+
+            for (int i = 125; i < 250; i++)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
             ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, true, 0));
             Assert.AreEqual("Passed", coordinator.Gate01Status);
             Assert.AreEqual(0, coordinator.LastGate01Reason);
+            Assert.AreEqual(125, coordinator.LastG1ShadowSummary.ObservedSamples);
         }
         finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void UnityShadowProbeShows477AdcRangeWithoutChangingG1Limit()
+    {
+        var probe = new PpgRawG1Probe();
+        for (int i = 0; i < 125; ++i)
+            probe.Observe(i, i * 40, 100000 + (i % 2) * 477,
+                120000 + (i % 2) * 820, true);
+        PpgRawG1Summary stats = probe.Summarize(5000, 125);
+        Assert.IsTrue(stats.CountAndSequenceCovered);
+        Assert.AreEqual(125, stats.ObservedSamples);
+        Assert.AreEqual(477, stats.RedRange);
+        Assert.AreEqual(820, stats.IrRange);
+        Assert.AreEqual(100000, stats.RedMin);
+        Assert.AreEqual(100477, stats.RedMax);
+        Assert.AreEqual(0, stats.ContactFalse);
+        Assert.AreEqual(0, stats.RedClips);
+        Assert.AreEqual(0, stats.IrClips);
+        StringAssert.Contains("UNITY_RAW_SHADOW_NOT_FIRMWARE",
+            stats.ToDiagnosticString());
+        StringAssert.Contains("redRange=477", stats.ToDiagnosticString());
+        // Diagnostic only: firmware's threshold remains unchanged at 500 ADC.
+    }
+
+    [Test]
+    public void UnityShadowProbeMakesMissingRawFramesExplicit()
+    {
+        var probe = new PpgRawG1Probe();
+        for (int i = 0; i < 125; ++i)
+        {
+            if (i == 60) continue; // a dropped JSON frame, not contact loss
+            probe.Observe(i, i * 40, 100000 + (i % 2) * 477,
+                120000 + (i % 2) * 820, true);
+        }
+        PpgRawG1Summary stats = probe.Summarize(5000, 125);
+        Assert.AreEqual(124, stats.ObservedSamples);
+        Assert.IsFalse(stats.CountAndSequenceCovered);
+        Assert.AreEqual(1, stats.SequenceGaps);
+        StringAssert.Contains("match=INCOMPLETE", stats.ToDiagnosticString());
+    }
+
+    [Test]
+    public void UnityShadowProbeSelectsLastFirmwareReportedSampleCount()
+    {
+        var probe = new PpgRawG1Probe();
+        for (int i = 0; i < 250; ++i)
+        {
+            int redAmplitude = i < 125 ? 2000 : 477;
+            probe.Observe(i, i * 40, 100000 + (i % 2) * redAmplitude,
+                120000 + (i % 2) * 820, true);
+        }
+        PpgRawG1Summary stats = probe.Summarize(10000, 125);
+        Assert.AreEqual(125, stats.ObservedSamples);
+        Assert.AreEqual(477, stats.RedRange);
+        Assert.AreEqual(0, stats.SequenceGaps);
+        probe.Clear();
+        Assert.IsTrue(probe.Summarize(10000, 125).Empty);
     }
 
     [Test]
