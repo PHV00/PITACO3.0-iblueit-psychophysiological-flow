@@ -146,11 +146,10 @@ namespace Ibit.Core.Oximetry.Integration
         private double lastLegacyBpm;
         private double lastLegacySpo2;
 
-        // Enabled by default for the integration test: no Inspector setup needed.
-        // Rate-limited so PPG samples (~25 Hz) do not flood the Unity Console.
-        [SerializeField] private bool logDiagnostics = true;
-        [SerializeField] private float logIntervalSeconds = 5f;
+        // Event-driven, no generic five-second duplicate snapshot spam.
         private float nextDiagnosticAt;
+        private float nextHeartbeatAt;
+        private string previousDiagnosticSignature;
 
         // A Bridge snapshot alone does NOT prove that the Mixer consumed it.
         // MixerManager acknowledges only after its fusion/adaptation calls finish.
@@ -177,27 +176,64 @@ namespace Ibit.Core.Oximetry.Integration
 
         private void Update()
         {
-            if (!logDiagnostics || Time.unscaledTime < nextDiagnosticAt)
-                return;
-            nextDiagnosticAt = Time.unscaledTime +
-                Mathf.Max(1f, logIntervalSeconds);
+            // Poll state at a low rate, log every eligibility/availability
+            // transition immediately. Include a heartbeat once every 10 s.
+            if (Time.unscaledTime < nextDiagnosticAt) return;
+            nextDiagnosticAt = Time.unscaledTime + 0.5f;
             OximetrySnapshot state = GetSnapshot();
             bool mixerRecent = lastMixerConsumptionAt >= 0f &&
                 Time.unscaledTime - lastMixerConsumptionAt <= 2f;
+            PpgMeasurement current = ppg != null ? ppg.LastMeasurement : null;
+            bool samePublication = current != null &&
+                object.ReferenceEquals(current, lastPublished);
+            float publicationAge = lastPitacoPublicationAt >= 0f
+                ? Time.unscaledTime - lastPitacoPublicationAt
+                : float.PositiveInfinity;
 
-            Debug.Log("[OximetryBridge->Mixer] source=" + state.Source +
+            string cause;
+            if (state.Source != OximetrySource.Pitaco24)
+                cause = "LEGACY_SOURCE";
+            else if (ppg == null)
+                cause = "NO_COORDINATOR";
+            else if (!ppg.OpticalContactConfirmed)
+                cause = "CONTACT_NOT_CONFIRMED";
+            else if (!ppg.Gate01Approved)
+                cause = "G1_NOT_APPROVED_" + ppg.Gate01Status;
+            else if (!samePublication)
+                cause = "MEASUREMENT_NOT_PUBLISHED";
+            else if (publicationAge > OximetrySnapshotFactory.MaxPitacoAgeSeconds)
+                cause = "PUBLISHED_MEASUREMENT_STALE";
+            else if (!state.HasSpO2 && !state.HasBpm)
+                cause = "ESTIMATORS_NO_VALUES";
+            else if (!state.HasSpO2)
+                cause = "SPO2_ONLY_REJECTED";
+            else if (!state.HasBpm)
+                cause = "BPM_ONLY_REJECTED";
+            else
+                cause = "AVAILABLE";
+
+            string signature = state.Source + "|" + cause + "|" +
+                state.HasBpm + "|" + state.HasSpO2 + "|" +
+                state.EligibleForLegacySpo2Rules + "|" + mixerRecent;
+            if (signature == previousDiagnosticSignature &&
+                Time.unscaledTime < nextHeartbeatAt)
+                return;
+            bool isTransition = signature != previousDiagnosticSignature;
+            previousDiagnosticSignature = signature;
+            nextHeartbeatAt = Time.unscaledTime + 10f;
+            Debug.Log("[PPG-DIAG] t=" + Time.unscaledTime.ToString("F2") +
+                " | event=" + (isTransition ? "BRIDGE_TRANSITION" : "BRIDGE_HEARTBEAT") +
+                " | cause=" + cause +
+                " | source=" + state.Source +
+                " | rawContact=" + (ppg != null && ppg.OpticalContactConfirmed) +
+                " | rawG1=" + (ppg != null && ppg.Gate01Approved) +
+                " | samePublication=" + samePublication +
+                " | ageS=" + publicationAge.ToString("F2") +
                 " | bpm=" + FormatReading(state.Bpm) +
-                " | spo2=" + FormatReading(state.SpO2Percent) +
-                " | demo=" + state.SpO2IsDemonstration +
-                " | contato=" + state.OpticalContactConfirmed +
-                " | G1=" + state.BasicSignalQualityApproved +
-                " | legacyRules=" + state.EligibleForLegacySpo2Rules +
-                " | age=" + state.AgeSeconds.ToString("F1") + "s" +
-                " | mixer=" + (mixerRecent ? "RECEBIDO" : "AGUARDANDO") +
-                " | mixerReads=" + mixerConsumptionCount +
-                " | mixerSource=" + (mixerRecent ? lastMixerConsumed.Source.ToString() : "--") +
-                " | mixerBpm=" + (mixerRecent ? FormatReading(lastMixerConsumed.Bpm) : "--") +
-                " | mixerSpo2=" + (mixerRecent ? FormatReading(lastMixerConsumed.SpO2Percent) : "--"));
+                " | spo2Demo=" + FormatReading(state.SpO2Percent) +
+                " | eligible=" + state.EligibleForLegacySpo2Rules +
+                " | mixerRecent=" + mixerRecent +
+                " | mixerReads=" + mixerConsumptionCount);
         }
 
         private static string FormatReading(double? value)
