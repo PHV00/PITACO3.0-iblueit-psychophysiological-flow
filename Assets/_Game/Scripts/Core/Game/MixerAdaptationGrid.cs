@@ -30,6 +30,35 @@ namespace Ibit.Core.Game
         [SerializeField] private CanvasManager _canvasManager;
         [SerializeField] private Spawner _spawner;
 
+        // Logging for functional integration only. Enabled in this test branch;
+        // no extra serial traffic and no changes to SpO2 decision thresholds.
+        [SerializeField] private bool logSpo2AdaptationTest = true;
+        private bool? lastSpo2EligibleForTest;
+
+        private void TraceSpo2AdaptationTest(OximetrySnapshot snapshot, string eventName)
+        {
+            if (!logSpo2AdaptationTest)
+                return;
+
+            Debug.Log("[SpO2Grid-Test] event=" + eventName +
+                " | source=" + snapshot.Source +
+                " | spo2=" + (snapshot.SpO2Percent.HasValue
+                    ? snapshot.SpO2Percent.Value.ToString("F1") : "--") +
+                " | demo=" + snapshot.SpO2IsDemonstration +
+                " | legacyRules=" + snapshot.EligibleForLegacySpo2Rules +
+                " | contato=" + snapshot.OpticalContactConfirmed +
+                " | G1=" + snapshot.BasicSignalQualityApproved +
+                " | age=" + snapshot.AgeSeconds.ToString("F1") + "s" +
+                " | limiarRegular=" + ParametersDb.parameters.MinimumRegularOxygenation +
+                " | limiarNormal=" + ParametersDb.parameters.MinimumNormalOxygenation +
+                " | contadorRegular=" + countSPORegular + "/" + limitSPORegular +
+                " | contadorPerigo=" + countSPODanger + "/" + limitSPODanger +
+                " | painel1Executado=" + SecurityPanelOneExecuted +
+                " | painel2Executado=" + SecurityPanelTwoExecuted +
+                " | intervaloAvaliacao=" + timeBetweenSamplesOxi.ToString("F1") + "s" +
+                " | tempoJogo=" + Time.time.ToString("F1") + "s");
+        }
+
         private void OnEnable()
         {
             // Variáveis para taxa de amostragem, que é o número de leituras usadas no jogo por minuto do Oxímetro (Tratamento de Sinais)
@@ -44,6 +73,7 @@ namespace Ibit.Core.Game
 
             SecurityPanelOneExecuted = false;
             SecurityPanelTwoExecuted = false;
+            lastSpo2EligibleForTest = null;
         }
 
         void AdaptationGrid(float signalPitaco, float signalMano,
@@ -60,8 +90,16 @@ namespace Ibit.Core.Game
             // Integration-test branch: the original saturation alerts, pauses
             // and rewards are also exercised with eligible PITACO 2.4 DEMO data.
             // DEMO is uncalibrated: do not use these alerts for patient safety.
-            if (!oximetry.EligibleForLegacySpo2Rules ||
-                !oximetry.SpO2Percent.HasValue)
+            bool eligible = oximetry.EligibleForLegacySpo2Rules &&
+                oximetry.SpO2Percent.HasValue;
+            if (!lastSpo2EligibleForTest.HasValue ||
+                lastSpo2EligibleForTest.Value != eligible)
+            {
+                TraceSpo2AdaptationTest(oximetry,
+                    eligible ? "ESTADO_ELEGIVEL" : "ESTADO_INELEGIVEL");
+                lastSpo2EligibleForTest = eligible;
+            }
+            if (!eligible)
             {
                 countSPORegular = 0;
                 countSPODanger = 0;
@@ -72,9 +110,13 @@ namespace Ibit.Core.Game
                 if (signalOxiSPO >= ParametersDb.parameters.MinimumRegularOxygenation && signalOxiSPO < ParametersDb.parameters.MinimumNormalOxygenation) // 85 até 94%    
                 {
                     if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem
+                    {
+                        TraceSpo2AdaptationTest(oximetry, "AMOSTRA_REGULAR_IGNORADA_SEM_ALVOS");
                         return;
+                    }
 
                     countSPORegular += 1;
+                    TraceSpo2AdaptationTest(oximetry, "AMOSTRA_REGULAR");
                     if (countSPORegular >= limitSPORegular && SecurityPanelOneExecuted == false) // Só dispara o "Security Panel 1" uma única vez durante o nível
                     {
                         GameObject.Find("Canvas").transform.Find("Security Panel 1").gameObject.SetActive(true);
@@ -84,6 +126,7 @@ namespace Ibit.Core.Game
                         _canvasManager.PauseGametoShowAlert(); // Pausa jogo
                         AddReward(-1f);
                         SecurityPanelOneExecuted = true;
+                        TraceSpo2AdaptationTest(oximetry, "PAINEL_1_ATIVADO_PAUSA_RECOMPENSA_SOLICITADA");
 
                         // if (_spawner == null){
                         //     _spawner = FindObjectOfType<Spawner>();
@@ -92,6 +135,7 @@ namespace Ibit.Core.Game
                         if ((StageModel.Loaded.ObjectSpeedFactor * ParametersDb.parameters.ObjectsSpeedFactor) >= 2){
                             // _spawner.speedReductionAdaptation = 1;  
                             DecreaseSpeed(); // Diminuir velocidade em um nível
+                            TraceSpo2AdaptationTest(oximetry, "PAINEL_1_REDUCAO_VELOCIDADE_SOLICITADA");
                         }
 
                     }
@@ -99,9 +143,13 @@ namespace Ibit.Core.Game
                     if (signalOxiSPO > 0 && signalOxiSPO < ParametersDb.parameters.MinimumRegularOxygenation)
                     {
                         if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem
+                        {
+                            TraceSpo2AdaptationTest(oximetry, "AMOSTRA_PERIGO_IGNORADA_SEM_ALVOS");
                             return;
+                        }
 
                         countSPODanger += 1;
+                        TraceSpo2AdaptationTest(oximetry, "AMOSTRA_PERIGO");
                         if (countSPODanger >= limitSPODanger && SecurityPanelTwoExecuted == false)  // Só dispara o "Security Panel 2" uma única vez durante o nível
                         {
                             GameObject.Find("Canvas").transform.Find("Security Panel 2").gameObject.SetActive(true);
@@ -111,11 +159,13 @@ namespace Ibit.Core.Game
                             _canvasManager.PauseGametoShowAlert(); // Pausa jogo
                             AddReward(-2f);
                             SecurityPanelTwoExecuted = true;
+                            TraceSpo2AdaptationTest(oximetry, "PAINEL_2_ATIVADO_PAUSA_RECOMPENSA_SOLICITADA");
                         }
                     } else {
                         countSPORegular = 0;
                         countSPODanger = 0;
                         AddReward(0.1f);
+                        TraceSpo2AdaptationTest(oximetry, "AMOSTRA_NORMAL_RECOMPENSA_SOLICITADA");
 
                         // if (_spawner == null){
                         //     _spawner = FindObjectOfType<Spawner>();
@@ -171,6 +221,13 @@ namespace Ibit.Core.Game
             if (agent != null)
             {
                 agent.AddReward(reward);
+                TraceSpo2AdaptationTest(CurrentLegacyRulesOximetry,
+                    "RECOMPENSA_APLICADA_" + reward.ToString("F1"));
+            }
+            else
+            {
+                TraceSpo2AdaptationTest(CurrentLegacyRulesOximetry,
+                    "RECOMPENSA_NAO_APLICADA_AGENTE_AUSENTE_" + reward.ToString("F1"));
             }
         }
 
