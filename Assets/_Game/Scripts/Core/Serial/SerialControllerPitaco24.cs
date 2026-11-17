@@ -39,6 +39,9 @@ namespace Ibit.Core.Serial
         [SerializeField] private int reconnectionDelay = 1000;
         [SerializeField] private int reopenSettleTimeMs = 1200;
         [SerializeField] private bool startSamplingOnConnect = true;
+        // Progress counters are now summarized by PpgProcessingCoordinator.
+        // Keep connection/error messages, suppress JSON:100/200/... noise.
+        private const bool EnableVerboseJsonProgress = false;
         [SerializeField] private int logEveryNJsonMessages = 100;
 
         private SerialThreadPitaco24 serialThread;
@@ -217,7 +220,7 @@ namespace Ibit.Core.Serial
                 return;
             JsonMessagesReceived++;
             OnJsonReceived?.Invoke(line);
-            if (logEveryNJsonMessages > 0 && JsonMessagesReceived % logEveryNJsonMessages == 0)
+            if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 && JsonMessagesReceived % logEveryNJsonMessages == 0)
                 Debug.Log("[PITACO 2.4] JSON: " + JsonMessagesReceived +
                           " | descartes da fila: " + PitacoConnectionManager.Active.DroppedLines);
         }
@@ -273,7 +276,7 @@ namespace Ibit.Core.Serial
                         JsonMessagesReceived++;
                         OnJsonReceived?.Invoke(line);
 
-                        if (logEveryNJsonMessages > 0 &&
+                        if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 &&
                             JsonMessagesReceived % logEveryNJsonMessages == 0)
                         {
                             Debug.Log("[PITACO 2.4] JSON: " + JsonMessagesReceived +
