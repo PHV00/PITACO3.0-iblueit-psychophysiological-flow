@@ -109,7 +109,7 @@ Só após conferir o log e as evidências do jogo deve-se planejar
 o próximo marco.
 
 
-## Execução 1 — resultado real recebido (17/11/2026)
+## Execução 1 — resultado real do log recebido nesta conversa
 
 **Veredito:** integração comprovada; teste de classificação por saturação e
 painéis **inconclusivo devido a configuração**. Não criar novo marco ainda.
