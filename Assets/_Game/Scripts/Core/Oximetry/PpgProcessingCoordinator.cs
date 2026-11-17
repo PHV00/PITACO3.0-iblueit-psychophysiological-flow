@@ -73,11 +73,23 @@ namespace Ibit.Core.Oximetry
         }
 
         [Serializable]
+        private sealed class Gate01StatsPayload
+        {
+            public int red_min, red_max, red_mean, red_range;
+            public int ir_min, ir_max, ir_mean, ir_range;
+            public int red_clips, ir_clips;
+            public bool gap;
+            public int limit_mean, limit_range;
+        }
+
+        [Serializable]
         private sealed class Gate01Frame
         {
             public string type;
             public long t_ms;
+            public int window;
             public Gate01SqiPayload sqi;
+            public Gate01StatsPayload stats; // optional: old firmware still works
         }
 
         private enum Gate01State
@@ -99,8 +111,12 @@ namespace Ibit.Core.Oximetry
         }
 
         [SerializeField] private SerialControllerPitaco24 serialController;
-        [SerializeField] private bool logDiagnostics = true;
-        [SerializeField] private float logIntervalSeconds = 5f;
+        // Test branch only: event-driven PPG diagnostics. This replaces the
+        // old verbose aggregate log; no Inspector override can re-enable it.
+        private const float QualityHeartbeatSeconds = 10f;
+        private const float QualityCalculationTraceSeconds = 2f;
+        private string lastCalculationDecision;
+        private float nextCalculationTraceAt;
 
         private readonly PpgSampleBuffer buffer = new PpgSampleBuffer();
         private bool hasPreviousProcessingTime;
@@ -199,38 +215,23 @@ namespace Ibit.Core.Oximetry
                 Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds)
                 MarkGate01Stale();
 
-            // Diagnostico de toda a cadeia: recepcao, contato, janela e
-            // estimativas. Antes so havia log apos um calculo bem-sucedido.
-            if (logDiagnostics && Time.unscaledTime >= nextLogTime)
+            if (Time.unscaledTime >= nextLogTime)
             {
-                nextLogTime = Time.unscaledTime + Math.Max(1f, logIntervalSeconds);
-                var measurement = LastMeasurement;
-                Debug.Log("[PPG C# diagnostico] JSON serial=" +
-                    (serialController != null ? serialController.JsonMessagesReceived : 0) +
-                    " | callbacks=" + jsonCallbacksReceived +
+                nextLogTime = Time.unscaledTime + QualityHeartbeatSeconds;
+                Trace("SUMMARY", "json=" + jsonCallbacksReceived +
                     " | samples=" + receivedSampleFrames +
-                    " | outroTipo=" + nonSampleJsonFrames +
-                    " | JSON invalido=" + invalidJsonFrames +
-                    " | semContato=" + missingContactFrames +
-                    " | amostraInvalida=" + invalidSampleFrames +
-                    " | ultimoTipo=" + lastJsonType +
-                    " | gateContato=ATIVADO" +
-                    " | G1=" + gate01State +
-                    " | G1_reason=" + lastGate01Reason +
-                    " | G1_samples=" + lastGate01Samples +
-                    " | G1_frames=" + gate01Frames +
-                    " | G1_invalidos=" + rejectedGate01Frames +
-                    " | G1_amostras_bloqueadas=" + blockedByGate01 +
-                    " | contato=" + OpticalContactConfirmed +
-                    " | contatoFalhasSeq=" + consecutiveNoContactSamples +
-                    " | lacunasContatoToleradas=" + toleratedShortContactGaps +
-                    " | perdasContatoConfirmadas=" + confirmedContactLosses +
+                    " | invalidJson=" + invalidJsonFrames +
+                    " | invalidSample=" + invalidSampleFrames +
+                    " | serialDropped=" +
+                    (serialController != null ? serialController.DroppedMessages : 0) +
+                    " | g1Frames=" + gate01Frames +
+                    " | blockedByG1=" + blockedByGate01 +
+                    " | contactFalse=" + missingContactFrames +
+                    " | contactLossConfirmed=" + confirmedContactLosses +
+                    " | gapsTolerated=" + toleratedShortContactGaps +
                     " | buffer=" + buffer.Count +
-                    " | estado=" + (measurement != null ? measurement.Status : "sem resultado") +
-                    " | BPM=" + (measurement != null && measurement.BpmEstimate.HasValue
-                        ? measurement.BpmEstimate.Value.ToString("F1") : "--") +
-                    " | SpO2 DEMO=" + (measurement != null && measurement.SpO2DemoPercent.HasValue
-                        ? measurement.SpO2DemoPercent.Value.ToString("F1") : "--"));
+                    " | contact=" + OpticalContactConfirmed +
+                    " | g1=" + gate01State);
             }
         }
 
@@ -265,6 +266,25 @@ namespace Ibit.Core.Oximetry
             ResetMeasurements("PITACO 2.4 desconectado");
         }
 
+        private static void Trace(string eventName, string detail)
+        {
+            Debug.Log("[PPG-DIAG] t=" + Time.unscaledTime.ToString("F2") +
+                " | event=" + eventName + " | " + detail);
+        }
+
+        // Every new outcome is logged immediately; repeated identical outcomes
+        // are sampled every two seconds to preserve metrics without flooding.
+        private void TraceCalculation(string decision, string detail)
+        {
+            if (decision == lastCalculationDecision &&
+                Time.unscaledTime < nextCalculationTraceAt)
+                return;
+            lastCalculationDecision = decision;
+            nextCalculationTraceAt =
+                Time.unscaledTime + QualityCalculationTraceSeconds;
+            Trace("CALC", detail);
+        }
+
         private void ClearHudContactHold()
         {
             hudShortContactGapActive = false;
@@ -274,6 +294,14 @@ namespace Ibit.Core.Oximetry
 
         private void InvalidatePpgWindow(string status)
         {
+            if (buffer.Count > 0 ||
+                (LastMeasurement != null &&
+                 (LastMeasurement.BpmEstimate.HasValue ||
+                  LastMeasurement.SpO2DemoPercent.HasValue)))
+                Trace("WINDOW_RESET", "reason=" + status +
+                    " | samplesDiscarded=" + buffer.Count +
+                    " | contact=" + OpticalContactConfirmed +
+                    " | g1=" + gate01State);
             ClearHudContactHold();
             buffer.Clear();
             hasPreviousProcessingTime = false;
@@ -305,6 +333,9 @@ namespace Ibit.Core.Oximetry
             if (gate01State != Gate01State.Passed) return;
             ClearHudContactHold();
             gate01State = Gate01State.Stale;
+            Trace("G1_EXPIRED", "ageS=" +
+                (Time.unscaledTime - lastGate01ArrivalAt).ToString("F2") +
+                " | bufferRetained=" + buffer.Count);
             // Suspend publication but retain collected samples until next G1
             // decision; no stale measurement may remain visible in the HUD.
             hasPreviousProcessingTime = false;
@@ -345,9 +376,30 @@ namespace Ibit.Core.Oximetry
             lastGate01Samples = result.sqi.samples;
             gate01Frames++;
 
+            string stats = result.stats == null
+                ? "metrics=UNAVAILABLE_OLD_FIRMWARE"
+                : "redMean=" + result.stats.red_mean +
+                  " | redRange=" + result.stats.red_range +
+                  " | irMean=" + result.stats.ir_mean +
+                  " | irRange=" + result.stats.ir_range +
+                  " | redMin=" + result.stats.red_min +
+                  " | redMax=" + result.stats.red_max +
+                  " | irMin=" + result.stats.ir_min +
+                  " | irMax=" + result.stats.ir_max +
+                  " | redClips=" + result.stats.red_clips +
+                  " | irClips=" + result.stats.ir_clips +
+                  " | acquisitionGap=" + result.stats.gap +
+                  " | minMean=" + result.stats.limit_mean +
+                  " | minRange=" + result.stats.limit_range;
+
             bool approved = result.sqi.g1 && result.sqi.reason == 0 &&
                 result.sqi.samples >= Gate01MinimumSamples;
             gate01State = approved ? Gate01State.Passed : Gate01State.Failed;
+            Trace(approved ? "G1_PASS" : "G1_REJECT",
+                "window=" + result.window + " | devMs=" + deviceMs +
+                " | samples=" + lastGate01Samples +
+                " | reason=" + lastGate01Reason +
+                " | bufferBefore=" + buffer.Count + " | " + stats);
             if (!approved)
             {
                 // A failed 5-second period must never leave the previous
@@ -422,6 +474,11 @@ namespace Ibit.Core.Oximetry
             if (!hasContact)
             {
                 missingContactFrames++;
+                if (OpticalContactConfirmed && consecutiveNoContactSamples == 0)
+                    Trace("CONTACT_GLITCH", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | reason=" + frame.sqi.reason +
+                        " | bufferRetained=" + buffer.Count);
                 if (consecutiveNoContactSamples < ContactLossConfirmationSamples)
                     ++consecutiveNoContactSamples;
 
@@ -432,6 +489,10 @@ namespace Ibit.Core.Oximetry
                     if (OpticalContactConfirmed)
                     {
                         ++confirmedContactLosses;
+                        Trace("CONTACT_LOST", "seq=" + frame.seq +
+                            " | devMs=" + frame.t_ms +
+                            " | consecutive=" + consecutiveNoContactSamples +
+                            " | confirmedLosses=" + confirmedContactLosses);
                         ResetMeasurements("Sem contato optico");
                         consecutiveNoContactSamples = ContactLossConfirmationSamples;
                     }
@@ -461,6 +522,11 @@ namespace Ibit.Core.Oximetry
 
             // Only confirmed existing contact can bridge 1-2 skipped frames.
             int toleratedGaps = OpticalContactConfirmed ? pendingShortContactGaps : 0;
+            if (!OpticalContactConfirmed || toleratedGaps > 0)
+                Trace("CONTACT_PRESENT", "seq=" + frame.seq +
+                    " | devMs=" + frame.t_ms +
+                    " | recoveredGaps=" + toleratedGaps +
+                    " | previousConfirmed=" + OpticalContactConfirmed);
             consecutiveNoContactSamples = 0;
             pendingShortContactGaps = 0;
             OpticalContactConfirmed = true;
@@ -471,6 +537,8 @@ namespace Ibit.Core.Oximetry
             if (gate01State == Gate01State.Passed &&
                 frame.sqi != null && frame.sqi.reason != 0)
             {
+                Trace("G1_REVOKED", "seq=" + frame.seq +
+                    " | sampleReason=" + frame.sqi.reason);
                 ResetGate01();
                 InvalidatePpgWindow("G1 reiniciado/invalidado pelo firmware");
             }
@@ -481,6 +549,9 @@ namespace Ibit.Core.Oximetry
             {
                 ClearHudContactHold();
                 invalidSampleFrames++;
+                Trace("SAMPLE_INVALID", "seq=" + frame.seq +
+                    " | devMs=" + frame.t_ms +
+                    " | red=" + frame.ppg.red + " | ir=" + frame.ppg.ir);
                 LastMeasurement = new PpgMeasurement(0, 0, null, null,
                     null, 0, "Amostra PPG invalida: seq/t_ms/RED/IR");
                 return;
@@ -497,6 +568,9 @@ namespace Ibit.Core.Oximetry
             lastSampleReceivedAt = Time.unscaledTime;
             if (!continuous)
             {
+                Trace("SEQUENCE_RESET", "seq=" + sample.Sequence +
+                    " | devMs=" + sample.TimeMs +
+                    " | bufferNow=" + buffer.Count);
                 ClearHudContactHold();
                 hasPreviousProcessingTime = false;
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
@@ -514,6 +588,11 @@ namespace Ibit.Core.Oximetry
                         : "G1 expirado: aguardando nova avaliacao";
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, gateBlockReason);
+                TraceCalculation("G1_" + gate01State, "stage=G1_BLOCK" +
+                    " | reason=" + gateBlockReason +
+                    " | seq=" + sample.Sequence +
+                    " | devMs=" + sample.TimeMs +
+                    " | buffer=" + buffer.Count);
                 return;
             }
 
@@ -528,14 +607,39 @@ namespace Ibit.Core.Oximetry
                 ClearHudContactHold();
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, reason);
+                TraceCalculation("WINDOW_" + reason,
+                    "stage=WINDOW_REJECT | reason=" + reason +
+                    " | seq=" + sample.Sequence +
+                    " | devMs=" + sample.TimeMs +
+                    " | buffer=" + buffer.Count);
                 return;
             }
 
             previousProcessingMs = sample.TimeMs;
             hasPreviousProcessingTime = true;
-            double bpm, autocorrelation, spo2Demo, ratio;
-            bool hasBpm = BpmEstimator.TryEstimate(processed, out bpm, out autocorrelation);
-            bool hasSpO2 = Spo2Estimator.TryEstimateDemo(processed, out spo2Demo, out ratio);
+            double bpm, autocorrelation, spo2Demo, ratio, selectedLag;
+            string bpmReason, spo2Reason;
+            bool hasBpm = BpmEstimator.TryEstimateDetailed(processed, out bpm,
+                out autocorrelation, out selectedLag, out bpmReason);
+            bool hasSpO2 = Spo2Estimator.TryEstimateDemoDetailed(processed,
+                out spo2Demo, out ratio, out spo2Reason);
+            TraceCalculation("BPM_" + bpmReason + "_SPO2_" + spo2Reason,
+                "stage=ESTIMATORS | seq=" + sample.Sequence +
+                " | devMs=" + sample.TimeMs +
+                " | buffer=" + buffer.Count +
+                " | fs=" + processed.SamplingHz.ToString("F2") +
+                " | reconstructed=" + processed.ReconstructedSamples +
+                " | redDC=" + processed.RedDc.ToString("F1") +
+                " | irDC=" + processed.IrDc.ToString("F1") +
+                " | redACrms=" + processed.RedAcRms.ToString("F2") +
+                " | irACrms=" + processed.IrAcRms.ToString("F2") +
+                " | bpmReason=" + bpmReason +
+                " | autocorr=" + autocorrelation.ToString("F3") +
+                " | lag=" + selectedLag.ToString("F2") +
+                " | bpm=" + (hasBpm ? bpm.ToString("F1") : "--") +
+                " | spo2Reason=" + spo2Reason +
+                " | ratioR=" + ratio.ToString("F4") +
+                " | spo2Demo=" + (hasSpO2 ? spo2Demo.ToString("F1") : "--"));
             LastMeasurement = new PpgMeasurement(sample.TimeMs, processed.SamplingHz,
                 hasBpm ? (double?)bpm : null,
                 hasSpO2 ? (double?)spo2Demo : null,
