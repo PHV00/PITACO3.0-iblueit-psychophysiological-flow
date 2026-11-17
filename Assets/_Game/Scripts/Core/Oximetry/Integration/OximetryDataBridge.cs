@@ -62,6 +62,11 @@ namespace Ibit.Core.Oximetry.Integration
         public const float MaxPitacoAgeSeconds = 2f;
         public const float MaxLegacyAgeSeconds = 15f;
 
+        // Integration testing ONLY: reproduce legacy gameplay rules using the
+        // uncalibrated PITACO 2.4 estimate. Set false to restore the original
+        // calibration requirement; never use this to claim clinical validity.
+        public const bool EnableDemoSpo2LegacyRulesForTesting = true;
+
         private static bool HasValidAge(float age, float limit)
         {
             return !float.IsNaN(age) && !float.IsInfinity(age) &&
@@ -94,12 +99,13 @@ namespace Ibit.Core.Oximetry.Integration
             double? spo2 = IsSpO2(measurement.SpO2DemoPercent)
                 ? measurement.SpO2DemoPercent : null;
 
-            // A future independently validated estimator can explicitly
-            // mark saturation as eligible; TryEstimateDemo never does.
+            // Keep clinical calibration separate from test-only permission to
+            // exercise the old game rules. DEMO must remain explicitly labeled.
+            bool calibrated = measurement.SpO2CalibratedForLegacyRules;
             bool eligible = spo2.HasValue &&
-                measurement.SpO2CalibratedForLegacyRules;
+                (calibrated || EnableDemoSpo2LegacyRulesForTesting);
             return new OximetrySnapshot(OximetrySource.Pitaco24,
-                bpm, spo2, true, true, !eligible, eligible, ageSeconds);
+                bpm, spo2, true, true, !calibrated, eligible, ageSeconds);
         }
 
         public static OximetrySnapshot SelectForLegacyRules(
