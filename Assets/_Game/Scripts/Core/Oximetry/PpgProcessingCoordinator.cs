@@ -223,7 +223,9 @@ namespace Ibit.Core.Oximetry
                     " | invalidJson=" + invalidJsonFrames +
                     " | invalidSample=" + invalidSampleFrames +
                     " | serialDropped=" +
-                    (serialController != null ? serialController.DroppedMessages : 0) +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.DroppedLines
+                        : serialController != null ? serialController.DroppedMessages : 0) +
                     " | g1Frames=" + gate01Frames +
                     " | blockedByG1=" + blockedByGate01 +
                     " | contactFalse=" + missingContactFrames +
@@ -510,8 +512,14 @@ namespace Ibit.Core.Oximetry
                     // only. A fresh G1, contact and a 2-second age limit are
                     // still required; the normal measurement is invalidated.
                     if (consecutiveNoContactSamples == 1)
+                    {
                         hudShortContactGapActive = lastHudValidMeasurement != null &&
                             object.ReferenceEquals(LastMeasurement, lastHudValidMeasurement);
+                        Trace("HUD_HOLD_START",
+                            "eligible=" + hudShortContactGapActive +
+                            " | maxAgeS=" + HudShortContactHoldMaxAgeSeconds +
+                            " | visualOnly=true | mixerUsesLiveMeasurement=true");
+                    }
                     ++pendingShortContactGaps;
                     LastMeasurement = new PpgMeasurement(0, 0, null, null,
                         null, 0, "Contato optico instavel (" +
