@@ -34,6 +34,18 @@ namespace Ibit.Core.Game
         // no extra serial traffic and no changes to SpO2 decision thresholds.
         [SerializeField] private bool logSpo2AdaptationTest = true;
         private bool? lastSpo2EligibleForTest;
+        private float nextNoTargetsDiagnosticAt;
+
+        // Existing gameplay returns without advancing its sample clock when
+        // no targets exist; throttle this diagnostic to avoid per-frame spam.
+        private void TraceNoTargets(OximetrySnapshot snapshot, string eventName)
+        {
+            if (!logSpo2AdaptationTest ||
+                Time.unscaledTime < nextNoTargetsDiagnosticAt)
+                return;
+            nextNoTargetsDiagnosticAt = Time.unscaledTime + 5f;
+            TraceSpo2AdaptationTest(snapshot, eventName);
+        }
 
         private void TraceSpo2AdaptationTest(OximetrySnapshot snapshot, string eventName)
         {
@@ -74,6 +86,7 @@ namespace Ibit.Core.Game
             SecurityPanelOneExecuted = false;
             SecurityPanelTwoExecuted = false;
             lastSpo2EligibleForTest = null;
+            nextNoTargetsDiagnosticAt = 0f;
         }
 
         void AdaptationGrid(float signalPitaco, float signalMano,
@@ -111,7 +124,7 @@ namespace Ibit.Core.Game
                 {
                     if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem
                     {
-                        TraceSpo2AdaptationTest(oximetry, "AMOSTRA_REGULAR_IGNORADA_SEM_ALVOS");
+                        TraceNoTargets(oximetry, "AMOSTRA_REGULAR_IGNORADA_SEM_ALVOS");
                         return;
                     }
 
@@ -144,7 +157,7 @@ namespace Ibit.Core.Game
                     {
                         if (_spawner.SpawnedObjects.Count < 1) // Se não tiver objetos, os testes não seguem
                         {
-                            TraceSpo2AdaptationTest(oximetry, "AMOSTRA_PERIGO_IGNORADA_SEM_ALVOS");
+                            TraceNoTargets(oximetry, "AMOSTRA_PERIGO_IGNORADA_SEM_ALVOS");
                             return;
                         }
 
