@@ -5,7 +5,7 @@ using NUnit.Framework;
 public class OximetryDataBridgeTests
 {
     [Test]
-    public void Pitaco24PublishesFinalNumericReadingsWithoutLegacyAlerts()
+    public void Pitaco24DemoSpo2EnablesLegacyGameplayRulesForIntegrationTest()
     {
         var reading = new PpgMeasurement(12000, 25, 82, 96, 0.6,
             0.75, "EXPERIMENTAL - NAO CALIBRADO");
@@ -18,7 +18,8 @@ public class OximetryDataBridgeTests
         Assert.IsTrue(snapshot.HasBpm);
         Assert.IsTrue(snapshot.HasSpO2);
         Assert.IsTrue(snapshot.SpO2IsDemonstration);
-        Assert.IsFalse(snapshot.EligibleForLegacySpo2Rules);
+        Assert.IsTrue(OximetrySnapshotFactory.EnableDemoSpo2LegacyRulesForTesting);
+        Assert.IsTrue(snapshot.EligibleForLegacySpo2Rules);
     }
 
     [Test]
@@ -26,14 +27,22 @@ public class OximetryDataBridgeTests
     {
         var reading = new PpgMeasurement(12000, 25, 82, 96, 0.6,
             0.75, "EXPERIMENTAL");
-        Assert.IsFalse(OximetrySnapshotFactory.FromPitaco24(
-            true, false, true, reading, 0.1f).HasBpm);
-        Assert.IsFalse(OximetrySnapshotFactory.FromPitaco24(
-            true, true, false, reading, 0.1f).HasSpO2);
-        Assert.IsFalse(OximetrySnapshotFactory.FromPitaco24(
-            false, true, true, reading, 0.1f).HasSpO2);
-        Assert.IsFalse(OximetrySnapshotFactory.FromPitaco24(
-            true, true, true, reading, 2.1f).HasBpm);
+        var noContact = OximetrySnapshotFactory.FromPitaco24(
+            true, false, true, reading, 0.1f);
+        var failedGate = OximetrySnapshotFactory.FromPitaco24(
+            true, true, false, reading, 0.1f);
+        var disconnected = OximetrySnapshotFactory.FromPitaco24(
+            false, true, true, reading, 0.1f);
+        var stale = OximetrySnapshotFactory.FromPitaco24(
+            true, true, true, reading, 2.1f);
+        Assert.IsFalse(noContact.HasBpm);
+        Assert.IsFalse(failedGate.HasSpO2);
+        Assert.IsFalse(disconnected.HasSpO2);
+        Assert.IsFalse(stale.HasBpm);
+        Assert.IsFalse(noContact.EligibleForLegacySpo2Rules);
+        Assert.IsFalse(failedGate.EligibleForLegacySpo2Rules);
+        Assert.IsFalse(disconnected.EligibleForLegacySpo2Rules);
+        Assert.IsFalse(stale.EligibleForLegacySpo2Rules);
     }
 
     [Test]
@@ -98,7 +107,8 @@ public class OximetryDataBridgeTests
         var fallback = OximetrySnapshotFactory.SelectForLegacyRules(
             primary, unavailableLegacy);
         Assert.AreEqual(OximetrySource.Pitaco24, fallback.Source);
-        Assert.IsFalse(fallback.EligibleForLegacySpo2Rules);
+        Assert.IsTrue(fallback.EligibleForLegacySpo2Rules);
+        Assert.IsTrue(fallback.SpO2IsDemonstration);
     }
 
     [Test]
@@ -110,6 +120,7 @@ public class OximetryDataBridgeTests
             true, true, true, reading, 0.1f);
         Assert.IsFalse(snapshot.HasBpm);
         Assert.IsFalse(snapshot.HasSpO2);
+        Assert.IsFalse(snapshot.EligibleForLegacySpo2Rules);
         Assert.IsFalse(OximetrySnapshotFactory.FromLegacy(
             true, double.NaN, 0, float.PositiveInfinity).HasBpm);
     }
