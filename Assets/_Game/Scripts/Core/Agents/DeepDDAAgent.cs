@@ -25,6 +25,9 @@ using UnityEditor;
 
 public class DeepDDAAgent : Agent
 {
+    // Diagnostic PPG branch: suppress repetitive action narration only.
+    // Keep all actions, rewards and warnings unchanged.
+    private const bool LogVerboseDdaActions = false;
     public static DeepDDAAgent instance;
     [SerializeField] private StageManager stage;
     [SerializeField] private Scorer scr;
@@ -637,7 +640,7 @@ public class DeepDDAAgent : Agent
             if(adjustSpeed != 0)
             {
                 AddReward(-0.5f / (StageModel.Loaded.Loops * 10));
-                Debug.Log("Velocidade: Manter a velocidade do treino.");
+                if (LogVerboseDdaActions) Debug.Log("Velocidade: Manter a velocidade do treino.");
             }
             break;
         
@@ -649,7 +652,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 2)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais fácil evitando a frustração
-                    Debug.Log("Velocidade: Diminuir a velocidade do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Velocidade: Diminuir a velocidade do treino.");
                 // }
                 // else
                 // {
@@ -668,7 +671,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 0)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais desafiador evitando o tédio
-                    Debug.Log("Velocidade: Aumentar a velocidade do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Velocidade: Aumentar a velocidade do treino.");
                 // }
                 // else
                 // {
@@ -692,7 +695,7 @@ public class DeepDDAAgent : Agent
                 || episodePerformanceDelta < -0.1)
             {
                 AddReward(-0.5f / (StageModel.Loaded.Loops * 10));
-                Debug.Log("Carga: Manter a carga do treino.");
+                if (LogVerboseDdaActions) Debug.Log("Carga: Manter a carga do treino.");
             }
             break;
 
@@ -704,7 +707,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 2)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais fácil evitando a frustração
-                    Debug.Log("Carga: Diminuir a carga do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Carga: Diminuir a carga do treino.");
                 // }
                 // else
                 // {
@@ -736,7 +739,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 0)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais desafiador
-                    Debug.Log("Carga: Aumentar a carga do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Carga: Aumentar a carga do treino.");
                 // }
                 // else
                 // {
