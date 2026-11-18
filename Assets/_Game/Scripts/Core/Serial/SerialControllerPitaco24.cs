@@ -7,7 +7,7 @@
 
 using System;
 using System.Collections;
-using System.Diagnostics;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
