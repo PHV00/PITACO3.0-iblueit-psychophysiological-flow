@@ -138,7 +138,16 @@ namespace Ibit.Core.Oximetry
         // 5-second G1 cadence plus 1.5 s of delivery tolerance.
         // Experimental parameter; reevaluate with real hardware logs.
         private const uint Gate01MaxAgeMs = 6500;
-        private const float Gate01MaxAgeSeconds = 6.5f;
+        // Device t_ms, not Unity frame time, decides G1 age per sample.
+        private const float TelemetryFreshnessSeconds = 3f;
+        private const double SerialQueueDiagnosticThresholdMs = 250.0;
+        private const double SerialQueuePublicationLimitMs = 2000.0;
+        private double lastJsonQueueAgeMs;
+        private double maxJsonQueueAgeMs;
+        private long jsonFramesOverQueueAgeLimit;
+        private bool serialQueueDelayed;
+        private uint lastObservedSampleDeviceMs;
+        private bool hasObservedSampleDeviceMs;
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
         // HUD-only hold: protects against a 1-2-sample contact flicker, not
@@ -166,9 +175,27 @@ namespace Ibit.Core.Oximetry
         public string Gate01Status => gate01State.ToString();
         public int LastGate01Reason => lastGate01Reason;
         public int LastGate01Samples => lastGate01Samples;
-        public bool Gate01Approved => gate01State == Gate01State.Passed &&
-            gate01Received && lastGate01ArrivalAt >= 0f &&
-            Time.unscaledTime - lastGate01ArrivalAt <= Gate01MaxAgeSeconds;
+        public bool Gate01Approved
+        {
+            get
+            {
+                if (gate01State != Gate01State.Passed || !gate01Received ||
+                    lastSampleReceivedAt < 0f ||
+                    Time.unscaledTime - lastSampleReceivedAt > TelemetryFreshnessSeconds ||
+                    lastJsonQueueAgeMs > SerialQueuePublicationLimitMs)
+                    return false;
+
+                // A sample may precede the G1 verdict by a few milliseconds.
+                if (hasObservedSampleDeviceMs)
+                {
+                    int deviceAge = unchecked((int)(lastObservedSampleDeviceMs -
+                        lastGate01TimeMs));
+                    if (deviceAge > (int)Gate01MaxAgeMs)
+                        return false;
+                }
+                return true;
+            }
+        }
 
         public PpgMeasurement LastMeasurement { get; private set; }
 
@@ -210,7 +237,7 @@ namespace Ibit.Core.Oximetry
             }
 
             if (lastSampleReceivedAt >= 0f &&
-                Time.unscaledTime - lastSampleReceivedAt > 3f)
+                Time.unscaledTime - lastSampleReceivedAt > TelemetryFreshnessSeconds)
             {
                 // ResetMeasurements sets the heartbeat to -1, so this event
                 // fires only once until optical frames resume.
@@ -221,10 +248,9 @@ namespace Ibit.Core.Oximetry
                 ResetMeasurements("Sem amostras PPG recentes");
             }
 
-            if (gate01State == Gate01State.Passed &&
-                lastGate01ArrivalAt >= 0f &&
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds)
-                MarkGate01Stale();
+            // No Unity-wall-clock G1 expiry: sample device timestamps
+            // determine G1 validity. The 3s telemetry watchdog above
+            // independently handles genuinely missing samples.
 
             if (Time.unscaledTime >= nextLogTime)
             {
@@ -237,6 +263,15 @@ namespace Ibit.Core.Oximetry
                     (PitacoConnectionManager.Active != null
                         ? PitacoConnectionManager.Active.DroppedLines
                         : serialController != null ? serialController.DroppedMessages : 0) +
+                    " | queuePending=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PendingLines : 0) +
+                    " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                    " | queuePeakMs=" + maxJsonQueueAgeMs.ToString("F1") +
+                    " | queuedOver2s=" + jsonFramesOverQueueAgeLimit +
+                    " | linesLastFrame=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.LastFrameLineCount : 0) +
+                    " | linesPeakFrame=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PeakFrameLineCount : 0) +
                     " | g1Frames=" + gate01Frames +
                     " | blockedByG1=" + blockedByGate01 +
                     " | contactFalse=" + missingContactFrames +
@@ -349,6 +384,9 @@ namespace Ibit.Core.Oximetry
             consecutiveNoContactSamples = 0;
             pendingShortContactGaps = 0;
             lastSampleReceivedAt = -1f;
+            hasObservedSampleDeviceMs = false;
+            lastJsonQueueAgeMs = 0.0;
+            serialQueueDelayed = false;
             ResetGate01();
         }
 
@@ -357,9 +395,12 @@ namespace Ibit.Core.Oximetry
             if (gate01State != Gate01State.Passed) return;
             ClearHudContactHold();
             gate01State = Gate01State.Stale;
-            Trace("G1_EXPIRED", "ageS=" +
-                (Time.unscaledTime - lastGate01ArrivalAt).ToString("F2") +
-                " | bufferRetained=" + buffer.Count);
+            Trace("G1_EXPIRED", "clock=DEVICE | lastGateDevMs=" +
+                lastGate01TimeMs + " | lastSampleDevMs=" +
+                lastObservedSampleDeviceMs + " | ageDeviceMs=" +
+                unchecked(lastObservedSampleDeviceMs - lastGate01TimeMs) +
+                " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                " | bufferBefore=" + buffer.Count);
             // The RAW diagnostic probe is preserved; the processing window
             // cannot mix an interval authorized by this expired PASS with
             // later candidate samples. One reset per transition to Stale.
@@ -436,9 +477,10 @@ namespace Ibit.Core.Oximetry
         {
             if (gate01State != Gate01State.Passed || !gate01Received)
                 return false;
-            if (lastGate01ArrivalAt < 0f ||
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds ||
-                unchecked(sampleTimeMs - lastGate01TimeMs) > Gate01MaxAgeMs)
+            int ageDeviceMs = unchecked((int)(sampleTimeMs - lastGate01TimeMs));
+            if (ageDeviceMs < 0)
+                return false; // Sample predates this G1 verdict; do not revoke.
+            if (ageDeviceMs > (int)Gate01MaxAgeMs)
             {
                 MarkGate01Stale();
                 return false;
