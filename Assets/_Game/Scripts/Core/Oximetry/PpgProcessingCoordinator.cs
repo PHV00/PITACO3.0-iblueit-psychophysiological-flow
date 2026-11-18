@@ -166,16 +166,6 @@ namespace Ibit.Core.Oximetry
         private long bpmLivePublications;
         private long bpmRedDiagnostic057Passes;
         private long bpmVisualHoldDecisions;
-        // Startup diagnostic timestamps: do not change contact/G1/BPM gates.
-        // A "contact session" starts on the first confirmed optical sample.
-        // Accumulate G1 failures/revocations until the first validated BPM.
-        private float startupContactUnityAt = -1f;
-        private uint startupContactDeviceMs;
-        private bool startupFirstGateLogged;
-        private bool startupFirstWindowLogged;
-        private bool startupFirstBpmLogged;
-        private int startupRejectedG1Windows;
-        private int startupRevocations;
         private PpgMeasurement lastHudValidMeasurement;
         private float lastHudValidAt = -1f;
         private bool hudShortContactGapActive;
@@ -244,17 +234,6 @@ namespace Ibit.Core.Oximetry
         public PpgMeasurement HudMeasurement =>
             HudHoldingShortContactGap ? lastHudValidMeasurement : LastMeasurement;
 
-        // Raw acquisition progress only: not an approved BPM or quality claim.
-        public float RawWindowCollectedSeconds
-        {
-            get
-            {
-                if (buffer.Count < 2) return 0f;
-                var list = buffer.Samples;
-                return unchecked(list[list.Count - 1].TimeMs -
-                    list[0].TimeMs) / 1000f;
-            }
-        }
         public int ConsecutiveBpmRejections => consecutiveBpmRejections;
         public double ActiveBpmAutocorrelationThreshold =>
             useExperimentalBpmThreshold055
@@ -300,12 +279,6 @@ namespace Ibit.Core.Oximetry
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("Aguardando amostras RED/IR");
-            startupContactUnityAt = -1f;
-            startupFirstGateLogged = false;
-            startupFirstWindowLogged = false;
-            startupFirstBpmLogged = false;
-            startupRejectedG1Windows = 0;
-            startupRevocations = 0;
             AttachIfAvailable();
         }
 
@@ -626,22 +599,6 @@ namespace Ibit.Core.Oximetry
                 " | samples=" + lastGate01Samples +
                 " | reason=" + lastGate01Reason +
                 " | bufferBefore=" + buffer.Count + " | " + stats);
-            if (startupContactUnityAt >= 0f && OpticalContactConfirmed &&
-                !startupFirstBpmLogged)
-            {
-                if (!approved)
-                    ++startupRejectedG1Windows;
-                else if (!startupFirstGateLogged)
-                {
-                    startupFirstGateLogged = true;
-                    Trace("STARTUP_FIRST_G1_PASS",
-                        "fromContactDeviceMs=" +
-                        unchecked(deviceMs - startupContactDeviceMs) +
-                        " | fromContactUnityS=" +
-                        (Time.unscaledTime - startupContactUnityAt).ToString("F2") +
-                        " | window=" + result.window);
-                }
-            }
             if (!approved)
             {
                 // A failed 5-second period must never leave the previous
@@ -794,19 +751,6 @@ namespace Ibit.Core.Oximetry
 
             // Only confirmed existing contact can bridge 1-2 skipped frames.
             int toleratedGaps = OpticalContactConfirmed ? pendingShortContactGaps : 0;
-            if (!OpticalContactConfirmed)
-            {
-                startupContactUnityAt = Time.unscaledTime;
-                startupContactDeviceMs = (uint)frame.t_ms;
-                startupFirstGateLogged = false;
-                startupFirstWindowLogged = false;
-                startupFirstBpmLogged = false;
-                startupRejectedG1Windows = 0;
-                startupRevocations = 0;
-                Trace("STARTUP_CONTACT", "seq=" + frame.seq +
-                    " | devMs=" + frame.t_ms +
-                    " | firstG1AndFullWindowRequired=true");
-            }
             if (!OpticalContactConfirmed || toleratedGaps > 0)
                 Trace("CONTACT_PRESENT", "seq=" + frame.seq +
                     " | devMs=" + frame.t_ms +
@@ -845,8 +789,6 @@ namespace Ibit.Core.Oximetry
             PpgAction action = DecideG1Action(sample.TimeMs, frame.sqi.reason);
             if (action == PpgAction.Reset)
             {
-                if (startupContactUnityAt >= 0f && !startupFirstBpmLogged)
-                    ++startupRevocations;
                 Trace("G1_REVOKED", "seq=" + frame.seq +
                     " | devMs=" + frame.t_ms +
                     " | sampleReason=" + frame.sqi.reason);
@@ -916,19 +858,6 @@ namespace Ibit.Core.Oximetry
 
             previousProcessingMs = sample.TimeMs;
             hasPreviousProcessingTime = true;
-            if (startupContactUnityAt >= 0f && !startupFirstWindowLogged)
-            {
-                startupFirstWindowLogged = true;
-                Trace("STARTUP_FIRST_FULL_WINDOW",
-                    "fromContactDeviceMs=" +
-                    unchecked(sample.TimeMs - startupContactDeviceMs) +
-                    " | fromContactUnityS=" +
-                    (Time.unscaledTime - startupContactUnityAt).ToString("F2") +
-                    " | rawSpanS=" + RawWindowCollectedSeconds.ToString("F2") +
-                    " | count=" + buffer.Count +
-                    " | priorG1Rejects=" + startupRejectedG1Windows +
-                    " | priorRevocations=" + startupRevocations);
-            }
             double bpm, autocorrelation, spo2Demo, ratio, candidateLag;
             double candidateBpm, redCandidateBpm, redAutocorr, redCandidateLag;
             string bpmReason, spo2Reason, redReason;
@@ -957,19 +886,6 @@ namespace Ibit.Core.Oximetry
             // while the G1/contact/telemetry predicates remain strict.
             if (hasBpm)
             {
-                if (startupContactUnityAt >= 0f && !startupFirstBpmLogged)
-                {
-                    startupFirstBpmLogged = true;
-                    Trace("STARTUP_FIRST_BPM",
-                        "bpm=" + bpm.ToString("F1") +
-                        " | autocorr=" + autocorrelation.ToString("F3") +
-                        " | fromContactDeviceMs=" +
-                        unchecked(sample.TimeMs - startupContactDeviceMs) +
-                        " | fromContactUnityS=" +
-                        (Time.unscaledTime - startupContactUnityAt).ToString("F2") +
-                        " | priorG1Rejects=" + startupRejectedG1Windows +
-                        " | priorRevocations=" + startupRevocations);
-                }
                 if (consecutiveBpmRejections > 0)
                     Trace("BPM_VISUAL_RECOVERED",
                         "previousRejects=" + consecutiveBpmRejections +
