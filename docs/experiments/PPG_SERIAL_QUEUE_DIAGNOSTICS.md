@@ -43,3 +43,52 @@ O firmware continua sendo a autoridade do G1 e a SpO2 nesta branch continua DEMO
 ## Próxima decisão
 
 Antes de alterar a duração de 8 s, o G1 de 5 s, a expiração de 6,5 s ou o limite de autocorrelação de 0,57, comparar a mesma aquisição e identificar a causa quantitativamente. Corrigir primeiro as perdas da cadeia de transporte se forem demonstradas.
+
+
+## Experimento B — expiração G1 sem destruir janela contínua (branch throughput-probe)
+
+Este incremento preserva o bloqueio de publicação do Bridge/Mixer quando o G1 expira
+ou é reprovado, e **não** modifica o período G1 de 5 s nem a janela PPG de 8 s.
+
+- `G1_EXPIRED`: mede `ageS` (Unity), `deviceAgeMs` (amostra mais recente
+  observada menos último G1 no relógio do PITACO), `serialPending` e
+  `bufferRetained`. Estes tempos pertencem a domínios diferentes.
+- `WINDOW_SUSPEND`: invalida imediatamente a medição publicada e o candidato
+  para a HUD, sem limpar amostras brutas temporariamente.
+- `G1_TIMING`: compara intervalo de chegada Unity `unityArrivalGapS`,
+  intervalo do firmware `deviceGapMs` e distância de número de janela.
+- `G1_RECOVERY`: `REUSE_CONTIGUOUS_RAW` apenas se o próximo G1 for PASS,
+  o número da janela avançar exatamente 1 e o intervalo entre timestamps G1
+  estiver entre 3500 e 6500 ms. Caso contrário: `RESET_RAW`.
+- Reprovação G1, perda de contato confirmada, reinício sinalizado pelo
+  firmware, falha de sequência e perda de telemetria continuam invalidando
+  os resultados; o fluxo de reset permanece conservador.
+- `BRIDGE_TRANSITION` inclui agora `coordinatorStatus`, `hudHold`,
+  `hudCandidateBpm`, `hudCandidateSpo2Demo`, `serialPending`.
+  **Candidato HUD não confirma renderização dos widgets da cena.**
+
+### Execução
+
+1. Reinicie o Unity Editor Play Mode na branch correta e confira
+   `[PITACO-QUEUE]` a cada ~10 s e `serialPending` no `[PPG-DIAG] SUMMARY`.
+   Sem esses campos, o código executado **não** corresponde à branch.
+2. Colete 120 s com dedo fixo; depois repita 120 s com o jogo e IA ativos.
+3. Exporte o Console completo (mensagens, erros e warnings).
+4. Observe se `G1_EXPIRED` continua ocorrendo; quando ocorrer, a publicação
+   deve ficar indisponível e registrar `WINDOW_SUSPEND`, **não**
+   `WINDOW_RESET` pelo mesmo motivo.
+5. Caso o próximo G1 seja consecutivo e aprovado, procure
+   `G1_RECOVERY mode=REUSE_CONTIGUOUS_RAW`; a janela não precisará ser
+   reconstruída do zero quando a continuidade e o número de amostras permitirem.
+6. Se o próximo G1 falhar, faltar uma janela, ocorrer perda de contato ou
+   descontinuidade da sequência, o descarte deve continuar e a HUD deve
+   permanecer indisponível até haver nova medição válida.
+7. Compare `PITACO-QUEUE maxFrameGapMs`, `maxWaitMs`, `pending`,
+   `G1_TIMING` e `BRIDGE_TRANSITION` para localizar atrasos.
+8. Se `BRIDGE_TRANSITION cause=AVAILABLE` persistir mas a HUD visível
+   congelar, investigar separadamente o script que renderiza os textos.
+   Este experimento ainda não instrumenta o widget de cena diretamente.
+
+Este código foi revisado estaticamente, mas não foi compilado nem executado no
+Unity Editor/hardware neste ambiente. SpO2 continua DEMO não calibrada e não
+é apropriada para decisões médicas ou alertas de pacientes.
