@@ -50,6 +50,9 @@ namespace Ibit.Core.Serial
 
         public bool IsConnected { get; private set; }
         public long JsonMessagesReceived { get; private set; }
+        // Manager-owned serial reader queue age at the moment this JSON is dispatched.
+        // Zero for the optional standalone controller (no manager timestamp).
+        public double LastJsonQueueAgeMs { get; private set; }
         public long DroppedMessages
         {
             get { return serialThread != null ? serialThread.DroppedMessages : 0; }
@@ -207,10 +210,16 @@ namespace Ibit.Core.Serial
         {
             if (!IsConnected) return;
             IsConnected = false;
+            LastJsonQueueAgeMs = 0.0;
             OnSerialDisconnected?.Invoke();
         }
 
         internal void ManagedLine(string message)
+        {
+            ManagedLine(message, 0.0);
+        }
+
+        internal void ManagedLine(string message, double queueAgeMs)
         {
             if (!IsConnected || string.IsNullOrEmpty(message)) return;
             OnSerialMessageReceived?.Invoke(message);
@@ -219,6 +228,7 @@ namespace Ibit.Core.Serial
                 !line.EndsWith("}", StringComparison.Ordinal))
                 return;
             JsonMessagesReceived++;
+            LastJsonQueueAgeMs = Math.Max(0.0, queueAgeMs);
             OnJsonReceived?.Invoke(line);
             if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 && JsonMessagesReceived % logEveryNJsonMessages == 0)
                 Debug.Log("[PITACO 2.4] JSON: " + JsonMessagesReceived +
