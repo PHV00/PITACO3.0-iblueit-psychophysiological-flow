@@ -159,6 +159,13 @@ namespace Ibit.Core.Oximetry
         private double? lastHudApprovedBpm;
         private float lastHudApprovedBpmAt = -1f;
         private int consecutiveBpmRejections;
+        // Exact calculation counts, unaffected by 2-second CALC log sampling.
+        private long bpmEvaluations;
+        private long bpmBaseline057Passes;
+        private long bpmExperimental055Passes;
+        private long bpmLivePublications;
+        private long bpmRedDiagnostic057Passes;
+        private long bpmVisualHoldDecisions;
         private PpgMeasurement lastHudValidMeasurement;
         private float lastHudValidAt = -1f;
         private bool hudShortContactGapActive;
@@ -346,7 +353,13 @@ namespace Ibit.Core.Oximetry
                     " | gapsTolerated=" + toleratedShortContactGaps +
                     " | buffer=" + buffer.Count +
                     " | contact=" + OpticalContactConfirmed +
-                    " | g1=" + gate01State);
+                    " | g1=" + gate01State +
+                    " | bpmTrials=" + bpmEvaluations +
+                    " | bpm057Pass=" + bpmBaseline057Passes +
+                    " | bpm055Pass=" + bpmExperimental055Passes +
+                    " | bpmPublished=" + bpmLivePublications +
+                    " | red057DiagnosticPass=" + bpmRedDiagnostic057Passes +
+                    " | bpmVisualHoldDecisions=" + bpmVisualHoldDecisions);
             }
         }
 
@@ -862,6 +875,12 @@ namespace Ibit.Core.Oximetry
             bool hasSpO2 = Spo2Estimator.TryEstimateDemoDetailed(processed,
                 out spo2Demo, out ratio, out spo2Reason);
 
+            ++bpmEvaluations;
+            if (baseline057Accepted) ++bpmBaseline057Passes;
+            if (experimental055Accepted) ++bpmExperimental055Passes;
+            if (redBaselineAccepted) ++bpmRedDiagnostic057Passes;
+            if (hasBpm) ++bpmLivePublications;
+
             // No extrapolation or rejected BPM enters the live measurement.
             // Retain only a previous validated BPM for <=2 HUD rejections
             // while the G1/contact/telemetry predicates remain strict.
@@ -937,6 +956,7 @@ namespace Ibit.Core.Oximetry
                 autocorrelation, processed.ReconstructedSamples > 0
                     ? "EXPERIMENTAL - BPM com lacunas reconstruidas; SpO2 bloqueada"
                     : "EXPERIMENTAL - NAO CALIBRADO");
+            if (HudHoldingRejectedBpm) ++bpmVisualHoldDecisions;
             // Release a display hold once the processor reaches a new verdict.
             // A rejected SpO2 remains "--"; we never invent a fresh reading.
             ClearHudContactHold();
