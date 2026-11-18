@@ -2,6 +2,7 @@
 // Os controladores existentes continuam responsaveis por eventos/protocolos.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
@@ -25,6 +26,9 @@ namespace Ibit.Core.Serial
             public PacketKind Kind;
             public Version DeviceVersion;
             public string Text;
+            // Monotonic host clock sampled on the serial worker immediately
+            // after ReadLine; same Stopwatch clock is used by the Unity thread.
+            public long EnqueuedTicks;
         }
 
         public static PitacoConnectionManager Active { get; private set; }
@@ -174,7 +178,7 @@ namespace Ibit.Core.Serial
                         break;
                     case PacketKind.Line:
                         if (activeVersion == Version.Pitaco24 && modern != null)
-                            modern.ManagedLine(packet.Text);
+                            modern.ManagedLine(packet.Text, packet.EnqueuedTicks);
                         if (legacy != null &&
                             (activeVersion == Version.Pitaco20 || IsNumericPressure(packet.Text)))
                             legacy.ManagedLine(packet.Text);
@@ -197,6 +201,7 @@ namespace Ibit.Core.Serial
 
         private void Push(PacketKind kind, Version version, string text)
         {
+            long receivedTicks = Stopwatch.GetTimestamp();
             lock (inboundLock)
             {
                 if (kind == PacketKind.Line)
@@ -208,7 +213,8 @@ namespace Ibit.Core.Serial
                     }
                     pendingLines++;
                 }
-                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text });
+                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version,
+                    Text = text, EnqueuedTicks = receivedTicks });
             }
         }
 
