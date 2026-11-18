@@ -166,7 +166,6 @@ namespace Ibit.Core.Oximetry
         private Gate01State gate01State = Gate01State.Waiting;
         private bool gate01Received;
         private uint lastGate01TimeMs;
-        private float lastGate01ArrivalAt = -1f;
         private int lastGate01Reason = -1;
         private int lastGate01Samples;
         private long gate01Frames;
@@ -373,7 +372,6 @@ namespace Ibit.Core.Oximetry
             gate01State = Gate01State.Waiting;
             gate01Received = false;
             lastGate01TimeMs = 0;
-            lastGate01ArrivalAt = -1f;
             lastGate01Reason = -1;
             lastGate01Samples = 0;
         }
@@ -437,7 +435,6 @@ namespace Ibit.Core.Oximetry
 
             gate01Received = true;
             lastGate01TimeMs = deviceMs;
-            lastGate01ArrivalAt = Time.unscaledTime;
             lastGate01Reason = result.sqi.reason;
             lastGate01Samples = result.sqi.samples;
             gate01Frames++;
