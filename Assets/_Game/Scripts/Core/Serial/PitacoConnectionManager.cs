@@ -56,6 +56,9 @@ namespace Ibit.Core.Serial
         private int peakPendingLines;
         private long queueBudgetExhaustions;
         private int peakQueueLagMs;
+        // Age since the USB worker enqueued the line currently being dispatched.
+        // Valid only during synchronous ManagedLine -> OnMeasurement callbacks.
+        private int currentDispatchQueueLagMs;
 
         // Interval counters: serial producer versus Unity main-thread consumer.
         // Diagnostics only; never throttle, re-order or discard additional lines.
@@ -77,6 +80,7 @@ namespace Ibit.Core.Serial
         public int PeakPendingLines => Volatile.Read(ref peakPendingLines);
         public long QueueBudgetExhaustions => Interlocked.Read(ref queueBudgetExhaustions);
         public int PeakQueueLagMs => Volatile.Read(ref peakQueueLagMs);
+        public int CurrentDispatchQueueLagMs => currentDispatchQueueLagMs;
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -190,9 +194,11 @@ namespace Ibit.Core.Serial
                     processedThisFrame++;
                     if (packet.Kind == PacketKind.Line) pendingLines--;
                 }
+                int lineLagMs = 0;
                 if (packet.Kind == PacketKind.Line)
                 {
                     int lagMs = unchecked(Environment.TickCount - packet.EnqueuedTick);
+                    lineLagMs = lagMs >= 0 ? lagMs : 0;
                     if (lagMs >= 0)
                     {
                         if (lagMs > peakQueueLagMs)
@@ -220,11 +226,21 @@ namespace Ibit.Core.Serial
                         Debug.LogWarning("[PITACO Manager] Conexao perdida. Redescobrindo COM...");
                         break;
                     case PacketKind.Line:
-                        if (activeVersion == Version.Pitaco24 && modern != null)
-                            modern.ManagedLine(packet.Text);
-                        if (legacy != null &&
-                            (activeVersion == Version.Pitaco20 || IsNumericPressure(packet.Text)))
-                            legacy.ManagedLine(packet.Text);
+                        // The coordinator and Bridge consume this value
+                        // synchronously while the JSON line is dispatched.
+                        currentDispatchQueueLagMs = lineLagMs;
+                        try
+                        {
+                            if (activeVersion == Version.Pitaco24 && modern != null)
+                                modern.ManagedLine(packet.Text);
+                            if (legacy != null &&
+                                (activeVersion == Version.Pitaco20 || IsNumericPressure(packet.Text)))
+                                legacy.ManagedLine(packet.Text);
+                        }
+                        finally
+                        {
+                            currentDispatchQueueLagMs = 0;
+                        }
                         break;
                     case PacketKind.Warning:
                         Debug.LogWarning("[PITACO Manager] " + packet.Text);
