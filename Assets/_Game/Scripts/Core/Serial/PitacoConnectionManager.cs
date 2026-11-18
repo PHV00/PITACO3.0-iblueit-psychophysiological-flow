@@ -36,7 +36,10 @@ namespace Ibit.Core.Serial
         [SerializeField] private int handshakeTimeoutMs = 3000;
         [SerializeField] private int scanRetryMs = 5000;
         [SerializeField] private int maxPendingLines = 2048;
-        [SerializeField] private int maxLinesPerFrame = 256;
+        // Limit the cost of a post-stall burst on the Unity main thread.
+        // At ~45 serial lines/s, 64 per frame leaves generous normal margin.
+        // A backlog is drained over several frames instead of one spike.
+        [SerializeField] private int maxLinesPerFrame = 64;
         [SerializeField] private string preferredPort = "";
 
         private readonly object inboundLock = new object();
@@ -53,6 +56,20 @@ namespace Ibit.Core.Serial
         private int peakPendingLines;
         private long queueBudgetExhaustions;
         private int peakQueueLagMs;
+
+        // Interval counters: serial producer versus Unity main-thread consumer.
+        // Diagnostics only; never throttle, re-order or discard additional lines.
+        private long enqueuedLinesTotal;
+        private long dispatchedLinesTotal;
+        private long loggedEnqueuedLines;
+        private long loggedDispatchedLines;
+        private long loggedDroppedLines;
+        private int diagnosticStartTick;
+        private int previousUpdateTick;
+        private int peakUpdateGapMs;
+        private int peakDispatchWorkMs;
+        private int peakIntervalQueueLagMs;
+        private const int QueueDiagnosticIntervalMs = 10000;
 
         public Version ConnectedVersion => activeVersion;
         public long DroppedLines => Interlocked.Read(ref droppedLines);
@@ -98,6 +115,8 @@ namespace Ibit.Core.Serial
             BindControllers();
             worker = new Thread(ScanAndRead) { IsBackground = true, Name = "PitacoSerialManager" };
             worker.Start();
+            diagnosticStartTick = Environment.TickCount;
+            previousUpdateTick = diagnosticStartTick;
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -149,6 +168,12 @@ namespace Ibit.Core.Serial
 
         private void Update()
         {
+            int frameStartTick = Environment.TickCount;
+            int frameGapMs = unchecked(frameStartTick - previousUpdateTick);
+            if (frameGapMs >= 0 && frameGapMs > peakUpdateGapMs)
+                peakUpdateGapMs = frameGapMs;
+            previousUpdateTick = frameStartTick;
+
             // Objetos de cena ja sao vinculados em sceneLoaded. Verificacao
             // eventual cobre instanciacao dinamica sem buscar a cada frame.
             if (Time.frameCount % 60 == 0)
@@ -168,8 +193,14 @@ namespace Ibit.Core.Serial
                 if (packet.Kind == PacketKind.Line)
                 {
                     int lagMs = unchecked(Environment.TickCount - packet.EnqueuedTick);
-                    if (lagMs >= 0 && lagMs > peakQueueLagMs)
-                        Interlocked.Exchange(ref peakQueueLagMs, lagMs);
+                    if (lagMs >= 0)
+                    {
+                        if (lagMs > peakQueueLagMs)
+                            Interlocked.Exchange(ref peakQueueLagMs, lagMs);
+                        if (lagMs > peakIntervalQueueLagMs)
+                            peakIntervalQueueLagMs = lagMs;
+                    }
+                    Interlocked.Increment(ref dispatchedLinesTotal);
                 }
 
                 switch (packet.Kind)
@@ -202,6 +233,42 @@ namespace Ibit.Core.Serial
             }
             if (processedThisFrame == count && PendingLines > 0)
                 Interlocked.Increment(ref queueBudgetExhaustions);
+
+            int dispatchWorkMs = unchecked(Environment.TickCount - frameStartTick);
+            if (dispatchWorkMs >= 0 && dispatchWorkMs > peakDispatchWorkMs)
+                peakDispatchWorkMs = dispatchWorkMs;
+            TraceQueueThroughput(frameStartTick);
+        }
+
+        private void TraceQueueThroughput(int nowTick)
+        {
+            int elapsedMs = unchecked(nowTick - diagnosticStartTick);
+            if (elapsedMs < QueueDiagnosticIntervalMs || elapsedMs < 0) return;
+            diagnosticStartTick = nowTick;
+            long enqueuedNow = Interlocked.Read(ref enqueuedLinesTotal);
+            long dispatchedNow = Interlocked.Read(ref dispatchedLinesTotal);
+            long droppedNow = Interlocked.Read(ref droppedLines);
+            long intervalIn = enqueuedNow - loggedEnqueuedLines;
+            long intervalOut = dispatchedNow - loggedDispatchedLines;
+            long intervalDropped = droppedNow - loggedDroppedLines;
+            loggedEnqueuedLines = enqueuedNow;
+            loggedDispatchedLines = dispatchedNow;
+            loggedDroppedLines = droppedNow;
+            int pending = PendingLines;
+            Debug.Log("[PITACO-QUEUE] intervalMs=" + elapsedMs +
+                " | in=" + intervalIn + " | out=" + intervalOut +
+                " | inHz=" + (intervalIn * 1000.0 / elapsedMs).ToString("F1", CultureInfo.InvariantCulture) +
+                " | outHz=" + (intervalOut * 1000.0 / elapsedMs).ToString("F1", CultureInfo.InvariantCulture) +
+                " | dropped=" + intervalDropped + " | pending=" + pending +
+                " | peakPending=" + PeakPendingLines +
+                " | maxWaitMs=" + peakIntervalQueueLagMs +
+                " | maxFrameGapMs=" + peakUpdateGapMs +
+                " | maxDispatchWorkMs=" + peakDispatchWorkMs +
+                " | budgetExhaustionsTotal=" + QueueBudgetExhaustions +
+                " | droppedTotal=" + droppedNow);
+            peakIntervalQueueLagMs = 0;
+            peakUpdateGapMs = 0;
+            peakDispatchWorkMs = 0;
         }
 
         private static bool IsNumericPressure(string line)
@@ -225,6 +292,7 @@ namespace Ibit.Core.Serial
                         return;
                     }
                     pendingLines++;
+                    Interlocked.Increment(ref enqueuedLinesTotal);
                     if (pendingLines > peakPendingLines)
                         peakPendingLines = pendingLines;
                 }

@@ -184,6 +184,9 @@ namespace Ibit.Core.Oximetry.Integration
             bool mixerRecent = lastMixerConsumptionAt >= 0f &&
                 Time.unscaledTime - lastMixerConsumptionAt <= 2f;
             PpgMeasurement current = ppg != null ? ppg.LastMeasurement : null;
+            // Diagnostic candidate for the HUD, NOT proof a UI widget rendered
+            // the value. Mixer eligibility continues to use LastMeasurement.
+            PpgMeasurement hudCandidate = ppg != null ? ppg.HudMeasurement : null;
             bool samePublication = current != null &&
                 object.ReferenceEquals(current, lastPublished);
             float publicationAge = lastPitacoPublicationAt >= 0f
@@ -233,7 +236,15 @@ namespace Ibit.Core.Oximetry.Integration
                 " | spo2Demo=" + FormatReading(state.SpO2Percent) +
                 " | eligible=" + state.EligibleForLegacySpo2Rules +
                 " | mixerRecent=" + mixerRecent +
-                " | mixerReads=" + mixerConsumptionCount);
+                " | mixerReads=" + mixerConsumptionCount +
+                " | coordinatorStatus=" + (current != null ? current.Status : "none") +
+                " | hudHold=" + (ppg != null && ppg.HudHoldingShortContactGap) +
+                " | hudCandidateBpm=" +
+                (hudCandidate != null ? FormatReading(hudCandidate.BpmEstimate) : "--") +
+                " | hudCandidateSpo2Demo=" +
+                (hudCandidate != null ? FormatReading(hudCandidate.SpO2DemoPercent) : "--") +
+                " | serialPending=" +
+                (PitacoConnectionManager.Active != null ? PitacoConnectionManager.Active.PendingLines : 0));
         }
 
         private static string FormatReading(double? value)
