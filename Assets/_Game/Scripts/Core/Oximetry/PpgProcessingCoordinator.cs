@@ -156,6 +156,10 @@ namespace Ibit.Core.Oximetry
         // NOT three independent 8-second PPG acquisition windows.
         private const int HudBpmRejectInvalidationCount = 3;
         private const float HudBpmHoldMaxAgeSeconds = 2f;
+        // The USB worker can hold a frame for seconds while Unity loads a
+        // scene. Neither the HUD nor the Mixer should show it as fresh.
+        private const int MaximumLivePublicationQueueLagMs = 2000;
+        public int LastPublishedQueueLagMs { get; private set; }
         private double? lastHudApprovedBpm;
         private float lastHudApprovedBpmAt = -1f;
         private int consecutiveBpmRejections;
@@ -228,6 +232,7 @@ namespace Ibit.Core.Oximetry
         public bool HudHoldingShortContactGap =>
             hudShortContactGapActive && consecutiveNoContactSamples < ContactLossConfirmationSamples &&
             OpticalContactConfirmed && Gate01Approved &&
+            LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
             lastHudValidMeasurement != null && lastHudValidAt >= 0f &&
             Time.unscaledTime - lastHudValidAt <= HudShortContactHoldMaxAgeSeconds;
 
@@ -248,6 +253,7 @@ namespace Ibit.Core.Oximetry
             consecutiveNoContactSamples == 0 && !hudShortContactGapActive &&
             OpticalContactConfirmed && Gate01Approved &&
             lastHudApprovedBpm.HasValue &&
+            LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
             LastMeasurement != null && !LastMeasurement.BpmEstimate.HasValue &&
             lastHudApprovedBpmAt >= 0f &&
             Time.unscaledTime - lastHudApprovedBpmAt <= HudBpmHoldMaxAgeSeconds;
@@ -259,6 +265,7 @@ namespace Ibit.Core.Oximetry
         public bool HudHasRecentLiveMeasurement =>
             Gate01Approved && OpticalContactConfirmed &&
             LastMeasurement != null &&
+            LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
             (LastMeasurement.BpmEstimate.HasValue ||
              LastMeasurement.SpO2DemoPercent.HasValue) &&
             lastHudValidAt >= 0f &&
@@ -359,7 +366,8 @@ namespace Ibit.Core.Oximetry
                     " | bpm055Pass=" + bpmExperimental055Passes +
                     " | bpmPublished=" + bpmLivePublications +
                     " | red057DiagnosticPass=" + bpmRedDiagnostic057Passes +
-                    " | bpmVisualHoldDecisions=" + bpmVisualHoldDecisions);
+                    " | bpmVisualHoldDecisions=" + bpmVisualHoldDecisions +
+                    " | publishQueueLagMs=" + LastPublishedQueueLagMs);
             }
         }
 
@@ -453,6 +461,7 @@ namespace Ibit.Core.Oximetry
             buffer.Clear();
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
+            LastPublishedQueueLagMs = 0;
         }
 
         private void SuspendPpgPublication(string status)
@@ -968,6 +977,9 @@ namespace Ibit.Core.Oximetry
                 lastHudValidMeasurement = LastMeasurement;
                 lastHudValidAt = Time.unscaledTime;
             }
+            LastPublishedQueueLagMs = PitacoConnectionManager.Active != null
+                ? Math.Max(0, PitacoConnectionManager.Active.CurrentDispatchQueueLagMs)
+                : 0;
             OnMeasurement?.Invoke(LastMeasurement);
 
 
