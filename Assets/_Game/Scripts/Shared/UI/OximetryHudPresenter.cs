@@ -94,7 +94,10 @@ namespace Ibit.Core.Oximetry.UI
                     ? "G1 reprovado: aguardando sinal valido"
                     : "aguardando aprovacao G1";
                 SetText(ConnectedPrefix + FormatPitaco24Values(null, null) +
-                    "\nPPG: " + reason, "G1_BLOCK");
+                    "\nPPG: " + reason +
+                    " (" + DescribeGateReason(coordinator.LastGate01Reason,
+                        coordinator.Gate01Status == "Failed") + ")",
+                    "G1_BLOCK");
                 return;
             }
 
@@ -128,8 +131,14 @@ namespace Ibit.Core.Oximetry.UI
             {
                 // Explicit unavailable state instead of an unexplained HUD
                 // reset. No clinical or gameplay authority is inferred here.
+                float rawSeconds = coordinator.RawWindowCollectedSeconds;
+                string waitReason = rawSeconds < PpgSampleBuffer.WindowMs / 1000f
+                    ? "coletando janela PPG (" +
+                      rawSeconds.ToString("F1", CultureInfo.InvariantCulture) +
+                      "/8,0 s)"
+                    : "janela completa; aguardando sinal periodico confiavel";
                 SetText(ConnectedPrefix + FormatPitaco24Values(null, null) +
-                    "\nPPG: aguardando estimativa valida", "WAIT_ESTIMATE");
+                    "\nPPG: " + waitReason, "WAIT_ESTIMATE");
                 return;
             }
 
@@ -138,8 +147,28 @@ namespace Ibit.Core.Oximetry.UI
             // measurement now reaches all three game scenes without a stale
             // intermediary or misleading last-value lag.
             var live = coordinator.HudMeasurement;
+            string bpmStatus = live.BpmEstimate.HasValue
+                ? string.Empty
+                : "\nPPG: BPM em reavaliacao (autocorrelacao insuficiente)";
             SetText(ConnectedPrefix + FormatPitaco24Values(
-                live.BpmEstimate, live.SpO2DemoPercent), "LIVE");
+                live.BpmEstimate, live.SpO2DemoPercent) + bpmStatus, "LIVE");
+        }
+
+        private static string DescribeGateReason(int reason, bool failed)
+        {
+            if (!failed) return "janela de qualidade em andamento";
+            switch (reason)
+            {
+                case 2: return "RED baixo; verificar posicionamento do dedo";
+                case 3: return "IR baixo; verificar posicionamento do dedo";
+                case 4: return "RED com pouca variacao";
+                case 5: return "IR com pouca variacao";
+                case 6:
+                case 7: return "sinal optico saturado";
+                case 8: return "amostras insuficientes";
+                case 9: return "interrupcao na aquisicao";
+                default: return "sinal nao aprovado";
+            }
         }
 
         private void SetText(string value, string state)
