@@ -25,6 +25,8 @@ namespace Ibit.Core.Serial
             public PacketKind Kind;
             public Version DeviceVersion;
             public string Text;
+            // Monotonic timestamp captured by the serial reader thread.
+            public long QueuedAtTicks;
         }
 
         public static PitacoConnectionManager Active { get; private set; }
@@ -52,6 +54,11 @@ namespace Ibit.Core.Serial
 
         public Version ConnectedVersion => activeVersion;
         public long DroppedLines => Interlocked.Read(ref droppedLines);
+        public int PendingLines { get { lock (inboundLock) return pendingLines; } }
+        public double LastDispatchQueueAgeMs { get; private set; }
+        public double MaxDispatchQueueAgeMs { get; private set; }
+        public int LastFrameLineCount { get; private set; }
+        public int PeakFrameLineCount { get; private set; }
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -146,6 +153,7 @@ namespace Ibit.Core.Serial
             if (Time.frameCount % 60 == 0)
                 BindControllers();
             int count = Math.Max(1, maxLinesPerFrame);
+            int dispatchedLines = 0;
             for (int i = 0; i < count; ++i)
             {
                 Packet packet;
@@ -173,8 +181,19 @@ namespace Ibit.Core.Serial
                         Debug.LogWarning("[PITACO Manager] Conexao perdida. Redescobrindo COM...");
                         break;
                     case PacketKind.Line:
+                        // Measure serial-thread enqueue -> main-thread dispatch.
+                        // Time.unscaledTime is unsuitable here: Update may stall.
+                        dispatchedLines++;
+                        long nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                        double queueAgeMs = packet.QueuedAtTicks > 0
+                            ? Math.Max(0.0, (nowTicks - packet.QueuedAtTicks) *
+                                1000.0 / System.Diagnostics.Stopwatch.Frequency)
+                            : 0.0;
+                        LastDispatchQueueAgeMs = queueAgeMs;
+                        if (queueAgeMs > MaxDispatchQueueAgeMs)
+                            MaxDispatchQueueAgeMs = queueAgeMs;
                         if (activeVersion == Version.Pitaco24 && modern != null)
-                            modern.ManagedLine(packet.Text);
+                            modern.ManagedLine(packet.Text, queueAgeMs);
                         if (legacy != null &&
                             (activeVersion == Version.Pitaco20 || IsNumericPressure(packet.Text)))
                             legacy.ManagedLine(packet.Text);
@@ -184,6 +203,9 @@ namespace Ibit.Core.Serial
                         break;
                 }
             }
+            LastFrameLineCount = dispatchedLines;
+            if (dispatchedLines > PeakFrameLineCount)
+                PeakFrameLineCount = dispatchedLines;
         }
 
         private static bool IsNumericPressure(string line)
@@ -208,7 +230,12 @@ namespace Ibit.Core.Serial
                     }
                     pendingLines++;
                 }
-                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text });
+                inbound.Enqueue(new Packet
+                {
+                    Kind = kind, DeviceVersion = version, Text = text,
+                    QueuedAtTicks = kind == PacketKind.Line
+                        ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L
+                });
             }
         }
 
