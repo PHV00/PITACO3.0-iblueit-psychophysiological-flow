@@ -291,6 +291,12 @@ namespace Ibit.Core.Oximetry
 
         // Every new outcome is logged immediately; repeated identical outcomes
         // are sampled every two seconds to preserve metrics without flooding.
+        private bool ShouldTraceCalculation(string decision)
+        {
+            return decision != lastCalculationDecision ||
+                Time.unscaledTime >= nextCalculationTraceAt;
+        }
+
         private void TraceCalculation(string decision, string detail,
             bool everyCall = false)
         {
@@ -624,11 +630,15 @@ namespace Ibit.Core.Oximetry
                         : "G1 expirado: aguardando nova avaliacao";
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, gateBlockReason);
-                TraceCalculation("G1_" + gate01State, "stage=G1_BLOCK" +
-                    " | reason=" + gateBlockReason +
-                    " | seq=" + sample.Sequence +
-                    " | devMs=" + sample.TimeMs +
-                    " | buffer=" + buffer.Count);
+                string decision = "G1_" + gate01State;
+                // Avoid formatting repetitive detailed diagnostic strings at
+                // 25 Hz: log only on state change or the 2-second heartbeat.
+                if (ShouldTraceCalculation(decision))
+                    TraceCalculation(decision, "stage=G1_BLOCK" +
+                        " | reason=" + gateBlockReason +
+                        " | seq=" + sample.Sequence +
+                        " | devMs=" + sample.TimeMs +
+                        " | buffer=" + buffer.Count);
                 return;
             }
 
@@ -643,11 +653,13 @@ namespace Ibit.Core.Oximetry
                 ClearHudContactHold();
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, reason);
-                TraceCalculation("WINDOW_" + reason,
-                    "stage=WINDOW_REJECT | reason=" + reason +
-                    " | seq=" + sample.Sequence +
-                    " | devMs=" + sample.TimeMs +
-                    " | buffer=" + buffer.Count);
+                string decision = "WINDOW_" + reason;
+                if (ShouldTraceCalculation(decision))
+                    TraceCalculation(decision,
+                        "stage=WINDOW_REJECT | reason=" + reason +
+                        " | seq=" + sample.Sequence +
+                        " | devMs=" + sample.TimeMs +
+                        " | buffer=" + buffer.Count);
                 return;
             }
 
