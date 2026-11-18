@@ -202,6 +202,16 @@ namespace Ibit.Core.Oximetry
         public PpgMeasurement HudMeasurement =>
             HudHoldingShortContactGap ? lastHudValidMeasurement : LastMeasurement;
 
+        // HUD-only freshness; the 2-second age mirrors the Bridge's maximum
+        // without making a visual presentation decision into Mixer authority.
+        public bool HudHasRecentLiveMeasurement =>
+            Gate01Approved && OpticalContactConfirmed &&
+            LastMeasurement != null &&
+            (LastMeasurement.BpmEstimate.HasValue ||
+             LastMeasurement.SpO2DemoPercent.HasValue) &&
+            lastHudValidAt >= 0f &&
+            Time.unscaledTime - lastHudValidAt <= HudShortContactHoldMaxAgeSeconds;
+
         public bool OpticalContactConfirmed { get; private set; }
         // Distinguish JSON-looking frames, callbacks, recognized sample frames
         // and actual valid PPG. These counters do not change the signal path.
