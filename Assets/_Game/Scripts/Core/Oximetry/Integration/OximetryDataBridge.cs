@@ -152,6 +152,7 @@ namespace Ibit.Core.Oximetry.Integration
         private SerialControllerOximetro legacyController;
         private PpgMeasurement lastPublished;
         private float lastPitacoPublicationAt = -1f;
+        private int lastPitacoPublicationQueueLagMs;
         private float lastLegacyPublicationAt = -1f;
         private double lastLegacyBpm;
         private double lastLegacySpo2;
@@ -249,6 +250,7 @@ namespace Ibit.Core.Oximetry.Integration
                 " | rawG1=" + (ppg != null && ppg.Gate01Approved) +
                 " | samePublication=" + samePublication +
                 " | ageS=" + publicationAge.ToString("F2") +
+                " | publishQueueLagMs=" + lastPitacoPublicationQueueLagMs +
                 " | bpm=" + FormatReading(state.Bpm) +
                 " | spo2Demo=" + FormatReading(state.SpO2Percent) +
                 " | eligible=" + state.EligibleForLegacySpo2Rules +
@@ -300,6 +302,10 @@ namespace Ibit.Core.Oximetry.Integration
         {
             lastPublished = measurement;
             lastPitacoPublicationAt = Time.unscaledTime;
+            var manager = PitacoConnectionManager.Active;
+            // An old line does NOT become fresh when Unity finally dispatches it.
+            lastPitacoPublicationQueueLagMs = manager != null
+                ? Math.Max(0, manager.CurrentDispatchQueueLagMs) : 0;
         }
 
         // Called after the legacy Player accepts its next comma-delimited pair.
@@ -324,7 +330,8 @@ namespace Ibit.Core.Oximetry.Integration
                 float age = measurement != null &&
                     object.ReferenceEquals(measurement, lastPublished) &&
                     lastPitacoPublicationAt >= 0f
-                    ? Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt)
+                    ? Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt) +
+                      lastPitacoPublicationQueueLagMs / 1000f
                     : float.PositiveInfinity;
                 return OximetrySnapshotFactory.FromPitaco24(
                     true, ppg != null && ppg.OpticalContactConfirmed,
@@ -366,6 +373,7 @@ namespace Ibit.Core.Oximetry.Integration
                 ppg.OnMeasurement -= OnPpgMeasurement;
             lastPublished = null;
             lastPitacoPublicationAt = -1f;
+            lastPitacoPublicationQueueLagMs = 0;
             lastMixerConsumptionAt = -1f;
             mixerConsumptionCount = 0;
             if (Active == this)
