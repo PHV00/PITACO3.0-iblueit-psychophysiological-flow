@@ -2,6 +2,7 @@
 // Os controladores existentes continuam responsaveis por eventos/protocolos.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
@@ -26,6 +27,9 @@ namespace Ibit.Core.Serial
             public Version DeviceVersion;
             public string Text;
             public int EnqueuedTick;
+            // Stopwatch time at full-line receipt on the USB worker, BEFORE
+            // main-thread dispatch or Unity scene loading delays.
+            public long ArrivalMonotonicTicks;
         }
 
         public static PitacoConnectionManager Active { get; private set; }
@@ -59,6 +63,7 @@ namespace Ibit.Core.Serial
         // Age since the USB worker enqueued the line currently being dispatched.
         // Valid only during synchronous ManagedLine -> OnMeasurement callbacks.
         private int currentDispatchQueueLagMs;
+        private long currentDispatchArrivalTicks;
 
         // Interval counters: serial producer versus Unity main-thread consumer.
         // Diagnostics only; never throttle, re-order or discard additional lines.
@@ -81,6 +86,8 @@ namespace Ibit.Core.Serial
         public long QueueBudgetExhaustions => Interlocked.Read(ref queueBudgetExhaustions);
         public int PeakQueueLagMs => Volatile.Read(ref peakQueueLagMs);
         public int CurrentDispatchQueueLagMs => currentDispatchQueueLagMs;
+        // Valid only in the synchronous ManagedLine/OnJsonReceived callback.
+        public long CurrentDispatchArrivalTicks => currentDispatchArrivalTicks;
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -229,6 +236,7 @@ namespace Ibit.Core.Serial
                         // The coordinator and Bridge consume this value
                         // synchronously while the JSON line is dispatched.
                         currentDispatchQueueLagMs = lineLagMs;
+                        currentDispatchArrivalTicks = packet.ArrivalMonotonicTicks;
                         try
                         {
                             if (activeVersion == Version.Pitaco24 && modern != null)
@@ -240,6 +248,7 @@ namespace Ibit.Core.Serial
                         finally
                         {
                             currentDispatchQueueLagMs = 0;
+                            currentDispatchArrivalTicks = 0;
                         }
                         break;
                     case PacketKind.Warning:
@@ -298,6 +307,9 @@ namespace Ibit.Core.Serial
 
         private void Push(PacketKind kind, Version version, string text)
         {
+            // Capture once in the worker immediately after ReadLine, before
+            // acquiring the queue lock. No wall-clock / UTC dependency.
+            long arrivalTicks = Stopwatch.GetTimestamp();
             lock (inboundLock)
             {
                 if (kind == PacketKind.Line)
@@ -313,7 +325,8 @@ namespace Ibit.Core.Serial
                         peakPendingLines = pendingLines;
                 }
                 inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text,
-                    EnqueuedTick = Environment.TickCount });
+                    EnqueuedTick = Environment.TickCount,
+                    ArrivalMonotonicTicks = arrivalTicks });
             }
         }
 
