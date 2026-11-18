@@ -175,3 +175,70 @@ git pull --ff-only origin test/unity-ppg-queue-throughput-probe
 **Limite da validacao atual:** revisao estatica do codigo, sem build
 do Unity Editor nem teste de hardware neste ambiente. A SpO2 DEMO
 permanece nao calibrada e nao e apropriada para decisoes clinicas.
+
+## Experimento D — Evidencias 2026-11-18: distinguir falha real de flicker Unity
+
+### Diagnostico do log executado no jogo Plataform
+
+- `t=26,73`: `UNITY_FRAME_STALL gapS=4,86`, fila USB com
+  `peakPending=218`, `maxWaitMs=4782`; `serialDropped=0`
+  e posteriormente `pending=0`. A fila recuperou sem perda.
+- `t=29,31; 34,31; 52,58; 57,58; 62,59; 67,58; 72,58; 77,58`:
+  `G1_PASS` seguido por um unico frame `[PPG-HUD] state=G1_BLOCK`
+  enquanto `g1=Passed`; no frame seguinte, `LIVE`.
+  Causa no codigo Unity: timestamp do novo G1 alguns ms a frente
+  do ultimo sample, gerando idade de dispositivo negativa na
+  verificacao de status. Correcao: tolerancia de 120 ms **somente
+  em Gate01Approved (HUD/Bridge)**. A autorizacao por amostra
+  `IsGate01ApprovedForSample` permanece estrita. Em novo teste,
+  verificar que a HUD nao alterna mais a `G1_BLOCK` para cada PASS.
+- `t=37,58`: `G1_REVOKED sampleReason=1` depois de duas amostras
+  `CONTACT_GLITCH reason=10`; reset de 205 samples.
+- `t=88,51`: `CONTACT_LOST consecutive=3`; reset de 205 amostras.
+- `t=107,47`: `G1_REJECT reason=5` informado pelo firmware.
+  O resumo sombra de RAW na Unity registra `irRange=469`,
+  `refMinRange=500`, `sequenceGaps=0`. Esses dados sao
+  diagnósticos (`UNITY_RAW_SHADOW_NOT_FIRMWARE`) e **nao provam**
+  internamente a mesma causa da decisao do firmware.
+- `t=111,14`: outra confirmacao `CONTACT_LOST consecutive=3`.
+  **Nenhum desses eventos deve ser transformado em G1 PASS pela Unity.**
+- `t=101,28`: o estimador SpO2 DEMO publicou `72,2` e o
+  Mixer registrou `legacyRules=True` no perfil de teste.
+  Saltos ate 98-99% refletem o estimador **nao calibrado** e
+  possiveis artefatos/variacao do ratio R; nao sao evidencias de
+  mudanca fisiologica. O caminho de teste de regras legadas
+  permanece explicitamente experimental e nao pode ser tratado
+  como criterio clinico.
+
+### Correcao de performance de gameplay
+
+`Target.Build()` inscrevia handlers em `Spawner`,
+`DeepDDAManager.OnUpdatedPerformanceTarget` e
+`OnUpdatedPerformanceLevel`. O `OnDestroy` retirava so
+a inscricao em `Spawner`, deixando listeners referindo-se
+a objetos ja destruidos. Os avisos repetidos
+`Tentando acessar um objeto Target que foi destruido`
+geram custo e stacktraces na thread principal. Agora
+`Target` guarda as instancias de inscricao, limpa todas em
+`OnDestroy` e evita assinatura duplicada ao reconstruir.
+
+### Protocolo de reteste
+
+1. Repetir 2 min de sessao Plataform com dedo estavel. Capturar
+   `[PPG-HUD]`, `[PPG-DIAG]`, `[PITACO-QUEUE]`, e os avisos
+   de `Target`.
+2. **Aceitacao Unity:** `G1_PASS` nao deve provocar
+   `G1_BLOCK` artificial em um frame; avisos sobre Target destruido
+   nao devem se repetir apos destroy; `dropped=0`.
+3. **Eventos nao eliminados por design:** `G1_REJECT`,
+   `CONTACT_LOST` confirmado e `sampleReason=1` ao retomar
+   contato. Permanecem indisponiveis os valores publicados ate
+   nova aprovacao real. Comparar a frequencia antes/depois,
+   sem atribuir automaticamente a Unity as reprovacoes.
+4. Se houver nova falha de leitura, comparar G1 `reason`,
+   `seq`, `t_ms`, `redRange`, `irRange`, fila e evento
+   `WINDOW_RESET` para classificar por qualidade, contato ou
+   comunicacao.
+
+O firmware PITACO continua congelado, sem ajuste de SQI.
+**Status:** somente revisao estatica; ainda nao compilado/testado na Unity.
