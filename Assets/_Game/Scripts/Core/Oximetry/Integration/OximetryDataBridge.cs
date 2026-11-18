@@ -189,6 +189,7 @@ namespace Ibit.Core.Oximetry.Integration
             PpgMeasurement hudCandidate = ppg != null ? ppg.HudMeasurement : null;
             bool samePublication = current != null &&
                 object.ReferenceEquals(current, lastPublished);
+            bool bpmHudHold = ppg != null && ppg.HudHoldingRejectedBpm;
             float publicationAge = lastPitacoPublicationAt >= 0f
                 ? Time.unscaledTime - lastPitacoPublicationAt
                 : float.PositiveInfinity;
@@ -217,7 +218,8 @@ namespace Ibit.Core.Oximetry.Integration
 
             string signature = state.Source + "|" + cause + "|" +
                 state.HasBpm + "|" + state.HasSpO2 + "|" +
-                state.EligibleForLegacySpo2Rules + "|" + mixerRecent;
+                state.EligibleForLegacySpo2Rules + "|" + mixerRecent +
+                "|" + bpmHudHold;
             if (signature == previousDiagnosticSignature &&
                 Time.unscaledTime < nextHeartbeatAt)
                 return;
@@ -239,6 +241,14 @@ namespace Ibit.Core.Oximetry.Integration
                 " | mixerReads=" + mixerConsumptionCount +
                 " | coordinatorStatus=" + (current != null ? current.Status : "none") +
                 " | hudHold=" + (ppg != null && ppg.HudHoldingShortContactGap) +
+                " | bpmHudHold=" + bpmHudHold +
+                " | bpmRejectStreak=" +
+                (ppg != null ? ppg.ConsecutiveBpmRejections : 0) +
+                " | bpmThreshold=" +
+                (ppg != null ? ppg.ActiveBpmAutocorrelationThreshold.ToString("F2") : "--") +
+                " | bpmHeldVisualOnly=" +
+                (ppg != null && ppg.HudRetainedBpmVisualOnly.HasValue
+                    ? FormatReading(ppg.HudRetainedBpmVisualOnly) : "--") +
                 " | hudCandidateBpm=" +
                 (hudCandidate != null ? FormatReading(hudCandidate.BpmEstimate) : "--") +
                 " | hudCandidateSpo2Demo=" +
