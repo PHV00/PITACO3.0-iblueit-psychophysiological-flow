@@ -149,6 +149,23 @@ namespace Ibit.Core.Oximetry
         // against G1 failure, stale telemetry or a rejected PPG calculation.
         // The Bridge/Mixer MUST continue reading LastMeasurement (not this).
         private const float HudShortContactHoldMaxAgeSeconds = 2f;
+        // Isolated experimental branch: compare against the unchanged 0.57
+        // baseline by unticking this Inspector flag (no firmware change).
+        [SerializeField] private bool useExperimentalBpmThreshold055 = true;
+        // Three consecutive *sliding-window recalculations* (~0.4 s apart),
+        // NOT three independent 8-second PPG acquisition windows.
+        private const int HudBpmRejectInvalidationCount = 3;
+        private const float HudBpmHoldMaxAgeSeconds = 2f;
+        private double? lastHudApprovedBpm;
+        private float lastHudApprovedBpmAt = -1f;
+        private int consecutiveBpmRejections;
+        // Exact calculation counts, unaffected by 2-second CALC log sampling.
+        private long bpmEvaluations;
+        private long bpmBaseline057Passes;
+        private long bpmExperimental055Passes;
+        private long bpmLivePublications;
+        private long bpmRedDiagnostic057Passes;
+        private long bpmVisualHoldDecisions;
         private PpgMeasurement lastHudValidMeasurement;
         private float lastHudValidAt = -1f;
         private bool hudShortContactGapActive;
@@ -216,6 +233,27 @@ namespace Ibit.Core.Oximetry
 
         public PpgMeasurement HudMeasurement =>
             HudHoldingShortContactGap ? lastHudValidMeasurement : LastMeasurement;
+
+        public int ConsecutiveBpmRejections => consecutiveBpmRejections;
+        public double ActiveBpmAutocorrelationThreshold =>
+            useExperimentalBpmThreshold055
+                ? BpmEstimator.ExperimentalMinimumAutocorrelation
+                : BpmEstimator.BaselineMinimumAutocorrelation;
+
+        // Only for the visual HUD. No old BPM is copied to LastMeasurement,
+        // OnMeasurement or the OximetryDataBridge/Mixer snapshot.
+        public bool HudHoldingRejectedBpm =>
+            consecutiveBpmRejections > 0 &&
+            consecutiveBpmRejections < HudBpmRejectInvalidationCount &&
+            consecutiveNoContactSamples == 0 && !hudShortContactGapActive &&
+            OpticalContactConfirmed && Gate01Approved &&
+            lastHudApprovedBpm.HasValue &&
+            LastMeasurement != null && !LastMeasurement.BpmEstimate.HasValue &&
+            lastHudApprovedBpmAt >= 0f &&
+            Time.unscaledTime - lastHudApprovedBpmAt <= HudBpmHoldMaxAgeSeconds;
+
+        public double? HudRetainedBpmVisualOnly =>
+            HudHoldingRejectedBpm ? lastHudApprovedBpm : null;
 
         // Display-only freshness; Bridge/Mixer still use LastMeasurement.
         public bool HudHasRecentLiveMeasurement =>
@@ -315,7 +353,13 @@ namespace Ibit.Core.Oximetry
                     " | gapsTolerated=" + toleratedShortContactGaps +
                     " | buffer=" + buffer.Count +
                     " | contact=" + OpticalContactConfirmed +
-                    " | g1=" + gate01State);
+                    " | g1=" + gate01State +
+                    " | bpmTrials=" + bpmEvaluations +
+                    " | bpm057Pass=" + bpmBaseline057Passes +
+                    " | bpm055Pass=" + bpmExperimental055Passes +
+                    " | bpmPublished=" + bpmLivePublications +
+                    " | red057DiagnosticPass=" + bpmRedDiagnostic057Passes +
+                    " | bpmVisualHoldDecisions=" + bpmVisualHoldDecisions);
             }
         }
 
@@ -387,6 +431,13 @@ namespace Ibit.Core.Oximetry
             lastHudValidAt = -1f;
         }
 
+        private void ResetBpmHudHold()
+        {
+            lastHudApprovedBpm = null;
+            lastHudApprovedBpmAt = -1f;
+            consecutiveBpmRejections = 0;
+        }
+
         private void InvalidatePpgWindow(string status)
         {
             if (buffer.Count > 0 ||
@@ -398,6 +449,7 @@ namespace Ibit.Core.Oximetry
                     " | contact=" + OpticalContactConfirmed +
                     " | g1=" + gate01State);
             ClearHudContactHold();
+            ResetBpmHudHold();
             buffer.Clear();
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
@@ -410,6 +462,7 @@ namespace Ibit.Core.Oximetry
             // window until the NEXT firmware verdict establishes continuity.
             int retained = buffer.Count;
             ClearHudContactHold();
+            ResetBpmHudHold();
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
             Trace("WINDOW_SUSPEND", "reason=" + status +
@@ -712,6 +765,7 @@ namespace Ibit.Core.Oximetry
                 frame.ppg.red, frame.ppg.ir, out sample))
             {
                 ClearHudContactHold();
+                ResetBpmHudHold();
                 invalidSampleFrames++;
                 Trace("SAMPLE_INVALID", "seq=" + frame.seq +
                     " | devMs=" + frame.t_ms +
@@ -750,6 +804,7 @@ namespace Ibit.Core.Oximetry
                     " | devMs=" + sample.TimeMs +
                     " | bufferNow=" + buffer.Count);
                 ClearHudContactHold();
+                ResetBpmHudHold();
                 hasPreviousProcessingTime = false;
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, "Janela reiniciada: sequencia/timestamp");
@@ -758,6 +813,7 @@ namespace Ibit.Core.Oximetry
             if (action != PpgAction.Allow)
             {
                 ClearHudContactHold();
+                ResetBpmHudHold();
                 blockedByGate01++;
                 string gateBlockReason = gate01State == Gate01State.Waiting
                     ? "Aguardando aprovacao G1"
@@ -787,6 +843,7 @@ namespace Ibit.Core.Oximetry
             if (!PpgSignalProcessor.TryProcess(buffer.Samples, out processed, out reason))
             {
                 ClearHudContactHold();
+                ResetBpmHudHold();
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, reason);
                 string decision = "WINDOW_" + reason;
@@ -801,12 +858,68 @@ namespace Ibit.Core.Oximetry
 
             previousProcessingMs = sample.TimeMs;
             hasPreviousProcessingTime = true;
-            double bpm, autocorrelation, spo2Demo, ratio, selectedLag;
-            string bpmReason, spo2Reason;
-            bool hasBpm = BpmEstimator.TryEstimateDetailed(processed, out bpm,
-                out autocorrelation, out selectedLag, out bpmReason);
+            double bpm, autocorrelation, spo2Demo, ratio, candidateLag;
+            double candidateBpm, redCandidateBpm, redAutocorr, redCandidateLag;
+            string bpmReason, spo2Reason, redReason;
+            double threshold = ActiveBpmAutocorrelationThreshold;
+            bool hasBpm = BpmEstimator.TryEstimateDetailedWithThreshold(
+                processed, threshold, out bpm, out autocorrelation,
+                out candidateLag, out candidateBpm, out bpmReason);
+            bool redBaselineAccepted = BpmEstimator.TryEstimateRedDiagnostic(
+                processed, out redCandidateBpm, out redAutocorr,
+                out redCandidateLag, out redReason);
+            bool baseline057Accepted = candidateBpm > 0.0 &&
+                autocorrelation >= BpmEstimator.BaselineMinimumAutocorrelation;
+            bool experimental055Accepted = candidateBpm > 0.0 &&
+                autocorrelation >= BpmEstimator.ExperimentalMinimumAutocorrelation;
             bool hasSpO2 = Spo2Estimator.TryEstimateDemoDetailed(processed,
                 out spo2Demo, out ratio, out spo2Reason);
+
+            ++bpmEvaluations;
+            if (baseline057Accepted) ++bpmBaseline057Passes;
+            if (experimental055Accepted) ++bpmExperimental055Passes;
+            if (redBaselineAccepted) ++bpmRedDiagnostic057Passes;
+            if (hasBpm) ++bpmLivePublications;
+
+            // No extrapolation or rejected BPM enters the live measurement.
+            // Retain only a previous validated BPM for <=2 HUD rejections
+            // while the G1/contact/telemetry predicates remain strict.
+            if (hasBpm)
+            {
+                if (consecutiveBpmRejections > 0)
+                    Trace("BPM_VISUAL_RECOVERED",
+                        "previousRejects=" + consecutiveBpmRejections +
+                        " | bpm=" + bpm.ToString("F1") +
+                        " | corr=" + autocorrelation.ToString("F3"));
+                consecutiveBpmRejections = 0;
+                lastHudApprovedBpm = bpm;
+                lastHudApprovedBpmAt = Time.unscaledTime;
+            }
+            else
+            {
+                int previousRejections = consecutiveBpmRejections;
+                consecutiveBpmRejections = Math.Min(
+                    HudBpmRejectInvalidationCount, consecutiveBpmRejections + 1);
+                // Emit 1, 2 and 3 exactly once each; do not spam every
+                // 400-ms calculation after the streak saturates at three.
+                if (consecutiveBpmRejections != previousRejections)
+                {
+                    bool holdEligible = consecutiveBpmRejections <
+                        HudBpmRejectInvalidationCount &&
+                        lastHudApprovedBpm.HasValue &&
+                        lastHudApprovedBpmAt >= 0f &&
+                        Time.unscaledTime - lastHudApprovedBpmAt <= HudBpmHoldMaxAgeSeconds;
+                    Trace("BPM_REJECT_STREAK",
+                        "consecutive=" + consecutiveBpmRejections +
+                        " | invalidateAt=" + HudBpmRejectInvalidationCount +
+                        " | visualHoldEligible=" + holdEligible +
+                        " | previousBpm=" + (lastHudApprovedBpm.HasValue
+                            ? lastHudApprovedBpm.Value.ToString("F1") : "--") +
+                        " | reason=" + bpmReason +
+                        " | visualOnly=true | mixerBpm=null");
+                }
+            }
+
             TraceCalculation("BPM_" + bpmReason + "_SPO2_" + spo2Reason,
                 "stage=ESTIMATORS | seq=" + sample.Sequence +
                 " | devMs=" + sample.TimeMs +
@@ -818,8 +931,20 @@ namespace Ibit.Core.Oximetry
                 " | redACrms=" + processed.RedAcRms.ToString("F2") +
                 " | irACrms=" + processed.IrAcRms.ToString("F2") +
                 " | bpmReason=" + bpmReason +
+                " | threshold=" + threshold.ToString("F2") +
                 " | autocorr=" + autocorrelation.ToString("F3") +
-                " | lag=" + selectedLag.ToString("F2") +
+                " | lag=" + candidateLag.ToString("F2") +
+                " | bpmCandidateDiagnostic=" +
+                    (candidateBpm > 0.0 ? candidateBpm.ToString("F1") : "--") +
+                " | baseline057=" + baseline057Accepted +
+                " | experiment055=" + experimental055Accepted +
+                " | redAutocorrDiagnostic=" + redAutocorr.ToString("F3") +
+                " | redLagDiagnostic=" + redCandidateLag.ToString("F2") +
+                " | redBpmCandidateDiagnostic=" +
+                    (redCandidateBpm > 0.0 ? redCandidateBpm.ToString("F1") : "--") +
+                " | redBaseline057=" + redBaselineAccepted +
+                " | redReasonDiagnostic=" + redReason +
+                " | bpmRejectStreak=" + consecutiveBpmRejections +
                 " | bpm=" + (hasBpm ? bpm.ToString("F1") : "--") +
                 " | spo2Reason=" + spo2Reason +
                 " | ratioR=" + ratio.ToString("F4") +
@@ -833,6 +958,7 @@ namespace Ibit.Core.Oximetry
                 autocorrelation, processed.ReconstructedSamples > 0
                     ? "EXPERIMENTAL - BPM com lacunas reconstruidas; SpO2 bloqueada"
                     : "EXPERIMENTAL - NAO CALIBRADO");
+            if (HudHoldingRejectedBpm) ++bpmVisualHoldDecisions;
             // Release a display hold once the processor reaches a new verdict.
             // A rejected SpO2 remains "--"; we never invent a fresh reading.
             ClearHudContactHold();
