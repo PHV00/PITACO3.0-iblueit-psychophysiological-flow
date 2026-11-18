@@ -150,6 +150,7 @@ namespace Ibit.Core.Oximetry.Integration
 
         private PpgProcessingCoordinator ppg;
         private SerialControllerOximetro legacyController;
+        private float nextLegacyLookupAt;
         private PpgMeasurement lastPublished;
         private float lastPitacoPublicationAt = -1f;
         private int lastPitacoPublicationQueueLagMs;
@@ -357,8 +358,13 @@ namespace Ibit.Core.Oximetry.Integration
 
         private OximetrySnapshot GetLegacySnapshot()
         {
-            if (legacyController == null)
+            // No legacy oximeter is a normal PITACO-only configuration.
+            // Do not execute a whole-scene search on every Mixer Update.
+            if (legacyController == null && Time.unscaledTime >= nextLegacyLookupAt)
+            {
+                nextLegacyLookupAt = Time.unscaledTime + 1f;
                 legacyController = FindObjectOfType<SerialControllerOximetro>();
+            }
             bool connected = legacyController != null && legacyController.IsConnected;
             float legacyAge = lastLegacyPublicationAt >= 0f
                 ? Mathf.Max(0f, Time.unscaledTime - lastLegacyPublicationAt)
