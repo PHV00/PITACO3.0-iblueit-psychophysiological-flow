@@ -495,6 +495,25 @@ namespace Ibit.Core.Oximetry
             if (string.IsNullOrEmpty(json)) return;
             jsonCallbacksReceived++;
 
+            // Measured by the serial worker thread's monotonic timestamp.
+            // Unlike Time.unscaledTime, this includes main-thread stalls.
+            lastJsonQueueAgeMs = serialController != null
+                ? Math.Max(0.0, serialController.LastJsonQueueAgeMs) : 0.0;
+            if (lastJsonQueueAgeMs > maxJsonQueueAgeMs)
+                maxJsonQueueAgeMs = lastJsonQueueAgeMs;
+            if (lastJsonQueueAgeMs > SerialQueuePublicationLimitMs)
+                ++jsonFramesOverQueueAgeLimit;
+            bool delayed = lastJsonQueueAgeMs > SerialQueueDiagnosticThresholdMs;
+            if (delayed != serialQueueDelayed)
+            {
+                serialQueueDelayed = delayed;
+                Trace(delayed ? "SERIAL_QUEUE_DELAY" : "SERIAL_QUEUE_RECOVERED",
+                    "queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                    " | maxMs=" + maxJsonQueueAgeMs.ToString("F1") +
+                    " | pending=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PendingLines : 0));
+            }
+
             SampleFrame frame;
             try { frame = JsonUtility.FromJson<SampleFrame>(json); }
             catch (ArgumentException)
@@ -528,6 +547,11 @@ namespace Ibit.Core.Oximetry
             // Update before evaluating contact, validity or G1; contact=false
             // still proves the JSON stream is alive.
             lastSampleReceivedAt = Time.unscaledTime;
+            if (frame.t_ms >= 0 && frame.t_ms <= uint.MaxValue)
+            {
+                lastObservedSampleDeviceMs = (uint)frame.t_ms;
+                hasObservedSampleDeviceMs = true;
+            }
 
             // Capture EVERY delivered RED/IR pair before contact/G1 filtering.
             // This history is independent of the 8s processing buffer, so a
@@ -680,6 +704,26 @@ namespace Ibit.Core.Oximetry
                         " | reason=" + gateBlockReason +
                         " | seq=" + sample.Sequence +
                         " | devMs=" + sample.TimeMs +
+                        " | buffer=" + buffer.Count);
+                return;
+            }
+
+            // The main thread can drain historical JSON after a stall.
+            // Retain its samples for diagnosis/window continuity but do not
+            // publish an old physiological estimate as a current reading.
+            if (lastJsonQueueAgeMs > SerialQueuePublicationLimitMs)
+            {
+                ClearHudContactHold();
+                LastMeasurement = new PpgMeasurement(sample.TimeMs, 0, null,
+                    null, null, 0, "Fila serial atrasada: medicao nao atual");
+                string backlogDecision = "SERIAL_BACKLOG";
+                if (ShouldTraceCalculation(backlogDecision))
+                    TraceCalculation(backlogDecision, "stage=SERIAL_BACKLOG" +
+                        " | seq=" + sample.Sequence +
+                        " | devMs=" + sample.TimeMs +
+                        " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                        " | pending=" + (PitacoConnectionManager.Active != null
+                            ? PitacoConnectionManager.Active.PendingLines : 0) +
                         " | buffer=" + buffer.Count);
                 return;
             }
