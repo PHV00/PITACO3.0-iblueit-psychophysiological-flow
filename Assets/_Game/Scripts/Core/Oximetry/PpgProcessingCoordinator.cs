@@ -747,7 +747,10 @@ namespace Ibit.Core.Oximetry
                         " | devMs=" + frame.t_ms +
                         " | resets=" + deviceClock.DeviceRestarts +
                         " | action=G1_AND_BUFFER_RESET");
-                    // Never reuse a G1 approval issued in the old epoch.
+                    // Never reuse G1 approval or diagnostic raw history
+                    // from the old epoch after a suspected device restart.
+                    rawG1Probe.Clear();
+                    LastG1ShadowSummary = null;
                     ResetMeasurements("PITACO: relogio/sequencia reiniciados");
                     lastSampleReceivedAt = Time.unscaledTime;
                     lastObservedDeviceMs = (uint)frame.t_ms;
