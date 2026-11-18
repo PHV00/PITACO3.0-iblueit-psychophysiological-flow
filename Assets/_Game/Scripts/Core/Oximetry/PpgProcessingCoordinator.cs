@@ -89,6 +89,15 @@ namespace Ibit.Core.Oximetry
             Stale
         }
 
+        // A single decision for each optically accepted sample. The G1
+        // firmware verdict remains authoritative: this is not a second SQI.
+        private enum PpgAction
+        {
+            Allow,   // Fresh G1 PASS; estimation may run.
+            Suspend, // Collect candidate samples; never publish until PASS.
+            Reset    // Firmware indicated a new G1 acquisition/session.
+        }
+
         [Serializable]
         private sealed class SampleFrame
         {
@@ -114,6 +123,8 @@ namespace Ibit.Core.Oximetry
         private bool hasPreviousProcessingTime;
         private uint previousProcessingMs;
         private float nextSearchTime;
+        // Receive-time heartbeat of ALL optical JSON sample frames, including
+        // those without contact. Never infer telemetry loss from finger-off.
         private float lastSampleReceivedAt = -1f;
         private float nextLogTime;
         private long receivedSampleFrames;
@@ -201,6 +212,12 @@ namespace Ibit.Core.Oximetry
             if (lastSampleReceivedAt >= 0f &&
                 Time.unscaledTime - lastSampleReceivedAt > 3f)
             {
+                // ResetMeasurements sets the heartbeat to -1, so this event
+                // fires only once until optical frames resume.
+                Trace("TELEMETRY_LOST",
+                    "ageS=" + (Time.unscaledTime - lastSampleReceivedAt).ToString("F2") +
+                    " | lastJsonType=" + lastJsonType +
+                    " | contactBefore=" + OpticalContactConfirmed);
                 ResetMeasurements("Sem amostras PPG recentes");
             }
 
@@ -337,11 +354,10 @@ namespace Ibit.Core.Oximetry
             Trace("G1_EXPIRED", "ageS=" +
                 (Time.unscaledTime - lastGate01ArrivalAt).ToString("F2") +
                 " | bufferRetained=" + buffer.Count);
-            // Suspend publication but retain collected samples until next G1
-            // decision; no stale measurement may remain visible in the HUD.
-            hasPreviousProcessingTime = false;
-            LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0,
-                "G1 expirado: aguardando nova avaliacao");
+            // The RAW diagnostic probe is preserved; the processing window
+            // cannot mix an interval authorized by this expired PASS with
+            // later candidate samples. One reset per transition to Stale.
+            InvalidatePpgWindow("G1 expirado: aguardando nova avaliacao");
         }
 
         private void ReceiveGate01(string json)
@@ -399,6 +415,17 @@ namespace Ibit.Core.Oximetry
             }
         }
 
+        private PpgAction DecideG1Action(uint sampleTimeMs, int sampleReason)
+        {
+            // After firmware contact reacquisition, sample.sqi.reason=1
+            // means its G1 accumulator was restarted. The old PASS is no
+            // longer valid even if the optical contact is currently true.
+            if (gate01State == Gate01State.Passed && sampleReason != 0)
+                return PpgAction.Reset;
+            return IsGate01ApprovedForSample(sampleTimeMs)
+                ? PpgAction.Allow : PpgAction.Suspend;
+        }
+
         private bool IsGate01ApprovedForSample(uint sampleTimeMs)
         {
             if (gate01State != Gate01State.Passed || !gate01Received)
@@ -449,6 +476,10 @@ namespace Ibit.Core.Oximetry
             }
 
             receivedSampleFrames++;
+            // This is receipt on Unity's main thread, not acquisition time.
+            // Update before evaluating contact, validity or G1; contact=false
+            // still proves the JSON stream is alive.
+            lastSampleReceivedAt = Time.unscaledTime;
 
             // Capture EVERY delivered RED/IR pair before contact/G1 filtering.
             // This history is independent of the 8s processing buffer, so a
@@ -534,18 +565,6 @@ namespace Ibit.Core.Oximetry
             pendingShortContactGaps = 0;
             OpticalContactConfirmed = true;
 
-            // Firmware resets the current G1 evaluation to reason=1 on a
-            // new sampling session. Revoke an older PASS even if USB stayed
-            // connected. Never treat the null per-sample g1 as a boolean.
-            if (gate01State == Gate01State.Passed &&
-                frame.sqi != null && frame.sqi.reason != 0)
-            {
-                Trace("G1_REVOKED", "seq=" + frame.seq +
-                    " | sampleReason=" + frame.sqi.reason);
-                ResetGate01();
-                InvalidatePpgWindow("G1 reiniciado/invalidado pelo firmware");
-            }
-
             PpgSample sample;
             if (!PpgSample.TryCreate(frame.seq, frame.t_ms,
                 frame.ppg.red, frame.ppg.ir, out sample))
@@ -567,8 +586,22 @@ namespace Ibit.Core.Oximetry
                 toleratedShortContactGaps += toleratedGaps;
             }
 
+            // Decide BEFORE adding to the candidate buffer. A G1 reset or
+            // expiry invalidates the preceding segment only once. Waiting and
+            // Failed states may accumulate candidate samples after the most
+            // recent invalidation, but they never authorize estimates.
+            PpgAction action = DecideG1Action(sample.TimeMs, frame.sqi.reason);
+            if (action == PpgAction.Reset)
+            {
+                Trace("G1_REVOKED", "seq=" + frame.seq +
+                    " | devMs=" + frame.t_ms +
+                    " | sampleReason=" + frame.sqi.reason);
+                ResetGate01();
+                InvalidatePpgWindow("G1 reiniciado/invalidado pelo firmware");
+                action = PpgAction.Suspend;
+            }
+
             bool continuous = buffer.Add(sample);
-            lastSampleReceivedAt = Time.unscaledTime;
             if (!continuous)
             {
                 Trace("SEQUENCE_RESET", "seq=" + sample.Sequence +
@@ -580,7 +613,7 @@ namespace Ibit.Core.Oximetry
                     null, null, null, 0, "Janela reiniciada: sequencia/timestamp");
             }
 
-            if (!IsGate01ApprovedForSample(sample.TimeMs))
+            if (action != PpgAction.Allow)
             {
                 ClearHudContactHold();
                 blockedByGate01++;
