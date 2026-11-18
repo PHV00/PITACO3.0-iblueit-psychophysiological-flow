@@ -1,4 +1,5 @@
 using System;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using Ibit.Core.Serial;
 using UnityEngine;
 
@@ -138,7 +139,48 @@ namespace Ibit.Core.Oximetry
         // 5-second G1 cadence plus 1.5 s of delivery tolerance.
         // Experimental parameter; reevaluate with real hardware logs.
         private const uint Gate01MaxAgeMs = 6500;
+        // Kept for diagnostics only. Unity wall time is NOT the device's
+        // acquisition clock; a main-thread stall cannot expire a fresh G1.
         private const float Gate01MaxAgeSeconds = 6.5f;
+        private const double MaximumTransportDelayMs = 2000.0;
+        private double lastTransportDelayMs;
+        private bool transportDelayed;
+        private long transportPackets;
+        private double transportDelaySumMs;
+        private double transportDelayMaximumMs;
+        private uint lastObservedDeviceTimeMs;
+        private bool hasObservedDeviceTime;
+
+        private struct CostMeter
+        {
+            public int Count;
+            public double TotalMs;
+            public double MaximumMs;
+
+            public void Add(long startedTicks)
+            {
+                double elapsedMs = (Stopwatch.GetTimestamp() - startedTicks) *
+                    1000.0 / Stopwatch.Frequency;
+                Count++;
+                TotalMs += elapsedMs;
+                if (elapsedMs > MaximumMs) MaximumMs = elapsedMs;
+            }
+
+            public string Report(string name)
+            {
+                return name + "_count=" + Count +
+                    " | " + name + "_meanMs=" +
+                    (Count == 0 ? 0.0 : TotalMs / Count).ToString("F3") +
+                    " | " + name + "_maxMs=" + MaximumMs.ToString("F3");
+            }
+        }
+
+        private CostMeter sampleCost;
+        private CostMeter g1Cost;
+        private CostMeter windowCost;
+        private CostMeter bpmCost;
+        private CostMeter spo2Cost;
+
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
         // HUD-only hold: protects against a 1-2-sample contact flicker, not
@@ -166,9 +208,14 @@ namespace Ibit.Core.Oximetry
         public string Gate01Status => gate01State.ToString();
         public int LastGate01Reason => lastGate01Reason;
         public int LastGate01Samples => lastGate01Samples;
+        // Do not compare ESP32 millis() with Unity Time.unscaledTime. A G1
+        // verdict is valid while the latest delivered sample is within its
+        // device-time age window AND the serial queue is not stale.
         public bool Gate01Approved => gate01State == Gate01State.Passed &&
-            gate01Received && lastGate01ArrivalAt >= 0f &&
-            Time.unscaledTime - lastGate01ArrivalAt <= Gate01MaxAgeSeconds;
+            gate01Received && !transportDelayed &&
+            (!hasObservedDeviceTime ||
+             unchecked((int)(lastObservedDeviceTimeMs - lastGate01TimeMs)) < 0 ||
+             unchecked(lastObservedDeviceTimeMs - lastGate01TimeMs) <= Gate01MaxAgeMs);
 
         public PpgMeasurement LastMeasurement { get; private set; }
 
@@ -221,11 +268,10 @@ namespace Ibit.Core.Oximetry
                 ResetMeasurements("Sem amostras PPG recentes");
             }
 
-            if (gate01State == Gate01State.Passed &&
-                lastGate01ArrivalAt >= 0f &&
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds)
-                MarkGate01Stale();
-
+            // G1 expires against the device timestamps in
+            // IsGate01ApprovedForSample, not against Unity frame time.
+            // When telemetry is absent for 3s the connection heartbeat
+            // already invalidates the measurement and G1.
             if (Time.unscaledTime >= nextLogTime)
             {
                 nextLogTime = Time.unscaledTime + QualityHeartbeatSeconds;
@@ -244,7 +290,27 @@ namespace Ibit.Core.Oximetry
                     " | gapsTolerated=" + toleratedShortContactGaps +
                     " | buffer=" + buffer.Count +
                     " | contact=" + OpticalContactConfirmed +
-                    " | g1=" + gate01State);
+                    " | g1=" + gate01State +
+                    " | queueDelayMs=" + lastTransportDelayMs.ToString("F1") +
+                    " | queueDelayed=" + transportDelayed);
+                Trace("PERF", "queuePackets=" + transportPackets +
+                    " | queueMeanMs=" +
+                    (transportPackets == 0 ? 0.0 :
+                        transportDelaySumMs / transportPackets).ToString("F1") +
+                    " | queueMaxMs=" + transportDelayMaximumMs.ToString("F1") +
+                    " | " + sampleCost.Report("sample") +
+                    " | " + g1Cost.Report("g1") +
+                    " | " + windowCost.Report("window") +
+                    " | " + bpmCost.Report("bpm") +
+                    " | " + spo2Cost.Report("spo2"));
+                transportPackets = 0;
+                transportDelaySumMs = 0;
+                transportDelayMaximumMs = 0;
+                sampleCost = default(CostMeter);
+                g1Cost = default(CostMeter);
+                windowCost = default(CostMeter);
+                bpmCost = default(CostMeter);
+                spo2Cost = default(CostMeter);
             }
         }
 
@@ -258,9 +324,9 @@ namespace Ibit.Core.Oximetry
                 serialController = FindObjectOfType<SerialControllerPitaco24>();
             if (serialController == null) return;
 
-            serialController.OnJsonReceived -= ReceiveJson;
+            serialController.OnJsonReceivedTimed -= ReceiveTimedJson;
             serialController.OnSerialDisconnected -= OnDeviceDisconnected;
-            serialController.OnJsonReceived += ReceiveJson;
+            serialController.OnJsonReceivedTimed += ReceiveTimedJson;
             serialController.OnSerialDisconnected += OnDeviceDisconnected;
         }
 
@@ -270,7 +336,7 @@ namespace Ibit.Core.Oximetry
             LastG1ShadowSummary = null;
             if (serialController != null)
             {
-                serialController.OnJsonReceived -= ReceiveJson;
+                serialController.OnJsonReceivedTimed -= ReceiveTimedJson;
                 serialController.OnSerialDisconnected -= OnDeviceDisconnected;
             }
             ResetMeasurements("Processamento suspenso");
@@ -281,6 +347,7 @@ namespace Ibit.Core.Oximetry
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("PITACO 2.4 desconectado");
+            transportDelayed = false;
         }
 
         private static void Trace(string eventName, string detail)
@@ -349,6 +416,7 @@ namespace Ibit.Core.Oximetry
             consecutiveNoContactSamples = 0;
             pendingShortContactGaps = 0;
             lastSampleReceivedAt = -1f;
+            hasObservedDeviceTime = false;
             ResetGate01();
         }
 
@@ -357,9 +425,13 @@ namespace Ibit.Core.Oximetry
             if (gate01State != Gate01State.Passed) return;
             ClearHudContactHold();
             gate01State = Gate01State.Stale;
-            Trace("G1_EXPIRED", "ageS=" +
+            Trace("G1_EXPIRED", "deviceAgeMs=" +
+                (hasObservedDeviceTime
+                    ? unchecked(lastObservedDeviceTimeMs - lastGate01TimeMs).ToString()
+                    : "unknown") +
+                " | unityArrivalAgeS=" +
                 (Time.unscaledTime - lastGate01ArrivalAt).ToString("F2") +
-                " | bufferRetained=" + buffer.Count);
+                " | bufferBefore=" + buffer.Count);
             // The RAW diagnostic probe is preserved; the processing window
             // cannot mix an interval authorized by this expired PASS with
             // later candidate samples. One reset per transition to Stale.
@@ -436,9 +508,7 @@ namespace Ibit.Core.Oximetry
         {
             if (gate01State != Gate01State.Passed || !gate01Received)
                 return false;
-            if (lastGate01ArrivalAt < 0f ||
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds ||
-                unchecked(sampleTimeMs - lastGate01TimeMs) > Gate01MaxAgeMs)
+            if (unchecked(sampleTimeMs - lastGate01TimeMs) > Gate01MaxAgeMs)
             {
                 MarkGate01Stale();
                 return false;
@@ -446,7 +516,53 @@ namespace Ibit.Core.Oximetry
             return true;
         }
 
+        // Kept for EditMode tests and explicit single-line replay. Production
+        // uses the monotonic worker receive timestamp through ReceiveTimedJson.
         private void ReceiveJson(string json)
+        {
+            ReceiveTimedJson(json, Stopwatch.GetTimestamp());
+        }
+
+        private void ReceiveTimedJson(string json, long workerReceiveTicks)
+        {
+            long started = Stopwatch.GetTimestamp();
+            double queueMs = workerReceiveTicks <= 0 ? 0.0 :
+                Math.Max(0.0, (started - workerReceiveTicks) *
+                    1000.0 / Stopwatch.Frequency);
+            lastTransportDelayMs = queueMs;
+            transportPackets++;
+            transportDelaySumMs += queueMs;
+            if (queueMs > transportDelayMaximumMs)
+                transportDelayMaximumMs = queueMs;
+
+            bool delayedNow = queueMs > MaximumTransportDelayMs;
+            if (delayedNow != transportDelayed)
+            {
+                transportDelayed = delayedNow;
+                Trace(delayedNow ? "QUEUE_DELAYED" : "QUEUE_RECOVERED",
+                    "queueDelayMs=" + queueMs.ToString("F1") +
+                    " | limitMs=" + MaximumTransportDelayMs.ToString("F0") +
+                    " | buffer=" + buffer.Count +
+                    " | g1=" + gate01State);
+                if (delayedNow)
+                {
+                    // Keep raw/candidate samples for later but never expose a
+                    // freshly published result from an old queued packet.
+                    ClearHudContactHold();
+                    LastMeasurement = new PpgMeasurement(0, 0, null, null,
+                        null, 0, "Telemetria na fila: aguardando dados recentes");
+                }
+            }
+
+            long processingStarted = Stopwatch.GetTimestamp();
+            ProcessJson(json);
+            if (lastJsonType == "sample")
+                sampleCost.Add(processingStarted);
+            else if (lastJsonType == "g1")
+                g1Cost.Add(processingStarted);
+        }
+
+        private void ProcessJson(string json)
         {
             // Handle firmware G1 window events and optical sample frames
             // independently; no second USB stream or software G1 calculation.
@@ -482,6 +598,11 @@ namespace Ibit.Core.Oximetry
             }
 
             receivedSampleFrames++;
+            if (frame.t_ms >= 0 && frame.t_ms <= uint.MaxValue)
+            {
+                lastObservedDeviceTimeMs = (uint)frame.t_ms;
+                hasObservedDeviceTime = true;
+            }
             // This is receipt on Unity's main thread, not acquisition time.
             // Update before evaluating contact, validity or G1; contact=false
             // still proves the JSON stream is alive.
@@ -619,18 +740,21 @@ namespace Ibit.Core.Oximetry
                     null, null, null, 0, "Janela reiniciada: sequencia/timestamp");
             }
 
-            if (action != PpgAction.Allow)
+            if (action != PpgAction.Allow || transportDelayed)
             {
                 ClearHudContactHold();
                 blockedByGate01++;
-                string gateBlockReason = gate01State == Gate01State.Waiting
+                string gateBlockReason = transportDelayed
+                    ? "Telemetria atrasada na fila USB"
+                    : gate01State == Gate01State.Waiting
                     ? "Aguardando aprovacao G1"
                     : gate01State == Gate01State.Failed
                         ? "G1 reprovado: reason=" + lastGate01Reason
                         : "G1 expirado: aguardando nova avaliacao";
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
                     null, null, null, 0, gateBlockReason);
-                string decision = "G1_" + gate01State;
+                string decision = transportDelayed ? "QUEUE_DELAYED" :
+                    "G1_" + gate01State;
                 // Avoid formatting repetitive detailed diagnostic strings at
                 // 25 Hz: log only on state change or the 2-second heartbeat.
                 if (ShouldTraceCalculation(decision))
