@@ -65,7 +65,14 @@ namespace Ibit.Core.Oximetry.Integration
         // Integration testing ONLY: reproduce legacy gameplay rules using the
         // uncalibrated PITACO 2.4 estimate. Set false to restore the original
         // calibration requirement; never use this to claim clinical validity.
-        public const bool EnableDemoSpo2LegacyRulesForTesting = true;
+        // Disabled by default. Explicit opt-in is restricted to controlled
+        // gameplay integration tests; never implies clinical calibration.
+        public static bool EnableDemoSpo2LegacyRulesForTesting { get; private set; }
+
+        public static void ConfigureDemoSpo2LegacyRulesForTesting(bool enabled)
+        {
+            EnableDemoSpo2LegacyRulesForTesting = enabled;
+        }
 
         private static bool HasValidAge(float age, float limit)
         {
@@ -138,6 +145,9 @@ namespace Ibit.Core.Oximetry.Integration
     {
         public static OximetryDataBridge Active { get; private set; }
 
+        [Header("Somente testes de integracao; NUNCA habilitar para pacientes")]
+        [SerializeField] private bool allowUncalibratedSpo2GameRulesForTesting = false;
+
         private PpgProcessingCoordinator ppg;
         private SerialControllerOximetro legacyController;
         private PpgMeasurement lastPublished;
@@ -171,6 +181,11 @@ namespace Ibit.Core.Oximetry.Integration
         {
             if (Active != null && Active != this) return;
             Active = this;
+            OximetrySnapshotFactory.ConfigureDemoSpo2LegacyRulesForTesting(
+                allowUncalibratedSpo2GameRulesForTesting);
+            if (allowUncalibratedSpo2GameRulesForTesting)
+                Debug.LogWarning("[PPG-TEST] SpO2 DEMO nao calibrado autorizado " +
+                    "para regras legadas SOMENTE neste ensaio de integracao.");
             AttachPpg();
         }
 
@@ -353,7 +368,11 @@ namespace Ibit.Core.Oximetry.Integration
             lastPitacoPublicationAt = -1f;
             lastMixerConsumptionAt = -1f;
             mixerConsumptionCount = 0;
-            if (Active == this) Active = null;
+            if (Active == this)
+            {
+                OximetrySnapshotFactory.ConfigureDemoSpo2LegacyRulesForTesting(false);
+                Active = null;
+            }
         }
     }
 }
