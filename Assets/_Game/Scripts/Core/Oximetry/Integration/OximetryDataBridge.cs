@@ -74,6 +74,19 @@ namespace Ibit.Core.Oximetry.Integration
             EnableDemoSpo2LegacyRulesForTesting = enabled;
         }
 
+        // Unity publication time alone is insufficient when serial frames
+        // remained queued through a scene stall. Queue delay is a conservative
+        // lower bound; it never makes a measurement appear younger.
+        public static float EffectiveAgeSeconds(float unityPublicationAge,
+            int queueLagMs)
+        {
+            if (float.IsNaN(unityPublicationAge) ||
+                float.IsInfinity(unityPublicationAge) ||
+                unityPublicationAge < 0f)
+                return float.PositiveInfinity;
+            return unityPublicationAge + Math.Max(0, queueLagMs) / 1000f;
+        }
+
         private static bool HasValidAge(float age, float limit)
         {
             return !float.IsNaN(age) && !float.IsInfinity(age) &&
@@ -208,8 +221,9 @@ namespace Ibit.Core.Oximetry.Integration
                 object.ReferenceEquals(current, lastPublished);
             bool bpmHudHold = ppg != null && ppg.HudHoldingRejectedBpm;
             float publicationAge = lastPitacoPublicationAt >= 0f
-                ? Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt) +
-                  lastPitacoPublicationQueueLagMs / 1000f
+                ? OximetrySnapshotFactory.EffectiveAgeSeconds(
+                    Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt),
+                    lastPitacoPublicationQueueLagMs)
                 : float.PositiveInfinity;
 
             string cause;
@@ -332,8 +346,9 @@ namespace Ibit.Core.Oximetry.Integration
                 float age = measurement != null &&
                     object.ReferenceEquals(measurement, lastPublished) &&
                     lastPitacoPublicationAt >= 0f
-                    ? Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt) +
-                      lastPitacoPublicationQueueLagMs / 1000f
+                    ? OximetrySnapshotFactory.EffectiveAgeSeconds(
+                        Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt),
+                        lastPitacoPublicationQueueLagMs)
                     : float.PositiveInfinity;
                 return OximetrySnapshotFactory.FromPitaco24(
                     true, ppg != null && ppg.OpticalContactConfirmed,
