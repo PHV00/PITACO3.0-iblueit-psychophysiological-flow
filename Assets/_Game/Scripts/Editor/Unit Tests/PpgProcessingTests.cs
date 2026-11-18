@@ -623,6 +623,137 @@ public class PpgProcessingTests
     }
 
     [Test]
+    public void ContactFalseOpticalFramesRefreshTelemetryHeartbeat()
+    {
+        var gameObject = new GameObject("PPG raw telemetry clock");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            var clockField = typeof(PpgProcessingCoordinator).GetField(
+                "lastSampleReceivedAt", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(clockField);
+            // Make the previous heartbeat stale. A frame with contact=false
+            // still demonstrates that the serial PPG stream is alive.
+            clockField.SetValue(coordinator, Time.unscaledTime - 4f);
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(0, false, 10));
+            float refreshed = (float)clockField.GetValue(coordinator);
+            Assert.GreaterOrEqual(refreshed, 0f);
+            Assert.That(Time.unscaledTime - refreshed, Is.LessThan(1f));
+
+            var update = typeof(PpgProcessingCoordinator).GetMethod(
+                "Update", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(update);
+            update.Invoke(coordinator, null);
+            Assert.AreNotEqual("Sem amostras PPG recentes",
+                coordinator.LastMeasurement.Status);
+            Assert.IsFalse(coordinator.OpticalContactConfirmed);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void ReasonOneRevokesG1OnlyOnceAndAccumulatesNewCandidateSamples()
+    {
+        var gameObject = new GameObject("PPG reset only once");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i <= 125; ++i)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(5000, true, 0));
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(126, true, 1));
+            Assert.AreEqual("Waiting", coordinator.Gate01Status);
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            var buffer = (PpgSampleBuffer)field.GetValue(coordinator);
+            Assert.AreEqual(1, buffer.Count,
+                "The old eligible window must be discarded on firmware reset.");
+
+            // The firmware is still waiting for its next G1. Repeated
+            // reason=1 must NOT clear a candidate buffer on every sample.
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(127, true, 1));
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(128, true, 1));
+            Assert.AreEqual("Waiting", coordinator.Gate01Status);
+            Assert.AreEqual(3, buffer.Count);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void StaleG1SeparatesOldWindowFromNewCandidateSamples()
+    {
+        var gameObject = new GameObject("PPG expired G1 isolation");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 210; ++i)
+            {
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+                if (i == 125)
+                    ReceiveG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0));
+            }
+            Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            var buffer = (PpgSampleBuffer)field.GetValue(coordinator);
+            Assert.Greater(buffer.Count, 200);
+
+            // Device time is >6.5s after the last PASS; no Unity wall-clock
+            // manipulation is needed to force this expiry deterministically.
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(300, true, 0));
+            Assert.AreEqual("Stale", coordinator.Gate01Status);
+            Assert.AreEqual(1, buffer.Count);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+            Assert.IsNotNull(coordinator.LastG1ShadowSummary,
+                "RAW diagnostic history is independent of the eligible buffer.");
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(301, true, 0));
+            Assert.AreEqual(2, buffer.Count);
+            Assert.AreEqual("Stale", coordinator.Gate01Status);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void FailedG1DiscardsPreviousWindowButRetainsFutureCandidates()
+    {
+        var gameObject = new GameObject("PPG explicit failure boundaries");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 250; ++i)
+            {
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+                if (i == 125)
+                    ReceiveG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0));
+            }
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            var buffer = (PpgSampleBuffer)field.GetValue(coordinator);
+            Assert.Greater(buffer.Count, 200);
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, false, 4));
+            Assert.AreEqual("Failed", coordinator.Gate01Status);
+            Assert.AreEqual(0, buffer.Count);
+            Assert.IsNotNull(coordinator.LastG1ShadowSummary);
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(250, true, 4));
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(251, true, 4));
+            Assert.AreEqual(2, buffer.Count);
+            Assert.AreEqual((ushort)250, buffer.Samples[0].Sequence);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
     public void Gate01OutOfOrderResultCannotOverrideLatestFailure()
     {
         var gameObject = new GameObject("PPG G1 ordering test");
