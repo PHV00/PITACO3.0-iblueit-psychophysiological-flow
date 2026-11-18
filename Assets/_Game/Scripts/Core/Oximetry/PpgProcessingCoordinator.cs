@@ -178,6 +178,7 @@ namespace Ibit.Core.Oximetry
         private CostMeter windowCost;
         private CostMeter bpmCost;
         private CostMeter spo2Cost;
+        private float maxUnityFrameDeltaSeconds;
 
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
@@ -248,6 +249,8 @@ namespace Ibit.Core.Oximetry
 
         private void Update()
         {
+            if (Time.unscaledDeltaTime > maxUnityFrameDeltaSeconds)
+                maxUnityFrameDeltaSeconds = Time.unscaledDeltaTime;
             if (serialController == null && Time.unscaledTime >= nextSearchTime)
             {
                 nextSearchTime = Time.unscaledTime + 1f;
@@ -306,7 +309,9 @@ namespace Ibit.Core.Oximetry
                     " | serialLastDrainPackets=" +
                     (PitacoConnectionManager.Active != null
                         ? PitacoConnectionManager.Active.LastDrainedPackets : 0));
-                Trace("PERF", "queuePackets=" + transportPackets +
+                Trace("PERF", "unityMaxFrameMs=" +
+                    (maxUnityFrameDeltaSeconds * 1000.0).ToString("F1") +
+                    " | queuePackets=" + transportPackets +
                     " | queueMeanMs=" +
                     (transportPackets == 0 ? 0.0 :
                         transportDelaySumMs / transportPackets).ToString("F1") +
@@ -324,6 +329,7 @@ namespace Ibit.Core.Oximetry
                 windowCost = default(CostMeter);
                 bpmCost = default(CostMeter);
                 spo2Cost = default(CostMeter);
+                maxUnityFrameDeltaSeconds = 0f;
             }
         }
 
