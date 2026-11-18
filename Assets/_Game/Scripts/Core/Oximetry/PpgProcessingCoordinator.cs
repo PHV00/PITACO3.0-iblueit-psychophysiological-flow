@@ -117,6 +117,9 @@ namespace Ibit.Core.Oximetry
         private float nextCalculationTraceAt;
 
         private readonly PpgSampleBuffer buffer = new PpgSampleBuffer();
+        // Independent timing diagnostics, never an alternative G1/SQI gate.
+        private readonly PpgMonotonicClockAligner deviceClock =
+            new PpgMonotonicClockAligner();
         // Diagnostics only, never feeds any gate, measurement or game decision.
         private readonly PpgRawG1Probe rawG1Probe = new PpgRawG1Probe();
         public PpgRawG1Summary LastG1ShadowSummary { get; private set; }
@@ -160,6 +163,14 @@ namespace Ibit.Core.Oximetry
         // scene. Neither the HUD nor the Mixer should show it as fresh.
         private const int MaximumLivePublicationQueueLagMs = 2000;
         public int LastPublishedQueueLagMs { get; private set; }
+        // Estimated age of the ending FIFO-read sample at publication.
+        // NaN means alignment is not established; Bridge falls back to
+        // the existing conservative USB queue-age policy.
+        public float LastPublishedAlignedSampleAgeAtPublishSeconds { get; private set; }
+        public bool HasDeviceClockAlignment => deviceClock.HasAlignment;
+        private bool PublishedClockFresh =>
+            float.IsNaN(LastPublishedAlignedSampleAgeAtPublishSeconds) ||
+            LastPublishedAlignedSampleAgeAtPublishSeconds <= 2f;
         private double? lastHudApprovedBpm;
         private float lastHudApprovedBpmAt = -1f;
         private int consecutiveBpmRejections;
@@ -233,6 +244,7 @@ namespace Ibit.Core.Oximetry
             hudShortContactGapActive && consecutiveNoContactSamples < ContactLossConfirmationSamples &&
             OpticalContactConfirmed && Gate01Approved &&
             LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
+            PublishedClockFresh &&
             lastHudValidMeasurement != null && lastHudValidAt >= 0f &&
             Time.unscaledTime - lastHudValidAt <= HudShortContactHoldMaxAgeSeconds;
 
@@ -254,6 +266,7 @@ namespace Ibit.Core.Oximetry
             OpticalContactConfirmed && Gate01Approved &&
             lastHudApprovedBpm.HasValue &&
             LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
+            PublishedClockFresh &&
             LastMeasurement != null && !LastMeasurement.BpmEstimate.HasValue &&
             lastHudApprovedBpmAt >= 0f &&
             Time.unscaledTime - lastHudApprovedBpmAt <= HudBpmHoldMaxAgeSeconds;
@@ -266,6 +279,7 @@ namespace Ibit.Core.Oximetry
             Gate01Approved && OpticalContactConfirmed &&
             LastMeasurement != null &&
             LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
+            PublishedClockFresh &&
             (LastMeasurement.BpmEstimate.HasValue ||
              LastMeasurement.SpO2DemoPercent.HasValue) &&
             lastHudValidAt >= 0f &&
@@ -283,6 +297,7 @@ namespace Ibit.Core.Oximetry
 
         private void OnEnable()
         {
+            deviceClock.Clear();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("Aguardando amostras RED/IR");
@@ -367,7 +382,16 @@ namespace Ibit.Core.Oximetry
                     " | bpmPublished=" + bpmLivePublications +
                     " | red057DiagnosticPass=" + bpmRedDiagnostic057Passes +
                     " | bpmVisualHoldDecisions=" + bpmVisualHoldDecisions +
-                    " | publishQueueLagMs=" + LastPublishedQueueLagMs);
+                    " | publishQueueLagMs=" + LastPublishedQueueLagMs +
+                    " | clockReady=" + deviceClock.HasAlignment +
+                    " | clockOffsetMs=" + deviceClock.OffsetMilliseconds.ToString("F1") +
+                    " | ingressExcessMs=" + deviceClock.LastExcessArrivalDelayMilliseconds.ToString("F1") +
+                    " | alignedPublishAgeMs=" +
+                        (float.IsNaN(LastPublishedAlignedSampleAgeAtPublishSeconds)
+                            ? "--" : (LastPublishedAlignedSampleAgeAtPublishSeconds * 1000f).ToString("F1")) +
+                    " | clockRestarts=" + deviceClock.DeviceRestarts +
+                    " | clockWraps=" + deviceClock.DeviceWraps +
+                    " | clockSampleGaps=" + deviceClock.AcquisitionGaps);
             }
         }
 
@@ -389,6 +413,7 @@ namespace Ibit.Core.Oximetry
 
         private void OnDisable()
         {
+            deviceClock.Clear();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             if (serialController != null)
@@ -401,6 +426,7 @@ namespace Ibit.Core.Oximetry
 
         private void OnDeviceDisconnected()
         {
+            deviceClock.Clear();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("PITACO 2.4 desconectado");
@@ -462,6 +488,7 @@ namespace Ibit.Core.Oximetry
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
             LastPublishedQueueLagMs = 0;
+            LastPublishedAlignedSampleAgeAtPublishSeconds = float.NaN;
         }
 
         private void SuspendPpgPublication(string status)
@@ -474,6 +501,7 @@ namespace Ibit.Core.Oximetry
             ResetBpmHudHold();
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
+            LastPublishedAlignedSampleAgeAtPublishSeconds = float.NaN;
             Trace("WINDOW_SUSPEND", "reason=" + status +
                 " | samplesRetained=" + retained +
                 " | publicationValid=false | contact=" + OpticalContactConfirmed +
@@ -698,6 +726,41 @@ namespace Ibit.Core.Oximetry
                 invalidSampleFrames++;
                 ResetMeasurements("Amostra sem SQI de contato");
                 return;
+            }
+
+            // The worker stamps the complete USB line BEFORE Unity's queue.
+            // Align against firmware t_ms/seq without moving any G1 logic.
+            var serialManager = PitacoConnectionManager.Active;
+            if (serialManager != null &&
+                serialManager.ConnectedVersion == PitacoConnectionManager.Version.Pitaco24 &&
+                serialManager.CurrentDispatchArrivalTicks > 0 &&
+                frame.seq >= 0 && frame.seq <= ushort.MaxValue &&
+                frame.t_ms >= 0 && frame.t_ms <= uint.MaxValue)
+            {
+                PpgClockObservation observation = deviceClock.Observe(
+                    (ushort)frame.seq, (uint)frame.t_ms,
+                    PpgMonotonicClockAligner.HostTimestampMilliseconds(
+                        serialManager.CurrentDispatchArrivalTicks));
+                if (observation == PpgClockObservation.DeviceRestart)
+                {
+                    Trace("CLOCK_DEVICE_RESTART", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | resets=" + deviceClock.DeviceRestarts +
+                        " | action=G1_AND_BUFFER_RESET");
+                    // Never reuse a G1 approval issued in the old epoch.
+                    ResetMeasurements("PITACO: relogio/sequencia reiniciados");
+                    lastSampleReceivedAt = Time.unscaledTime;
+                    lastObservedDeviceMs = (uint)frame.t_ms;
+                    hasObservedDeviceMs = true;
+                }
+                else if (observation == PpgClockObservation.DeviceWrap)
+                    Trace("CLOCK_DEVICE_WRAP", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | wraps=" + deviceClock.DeviceWraps);
+                else if (observation == PpgClockObservation.AcquisitionGap)
+                    Trace("CLOCK_SAMPLE_GAP", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | action=DIAGNOSTIC_ONLY");
             }
 
             bool hasContact = frame.sqi.contact;
@@ -980,6 +1043,11 @@ namespace Ibit.Core.Oximetry
             LastPublishedQueueLagMs = PitacoConnectionManager.Active != null
                 ? Math.Max(0, PitacoConnectionManager.Active.CurrentDispatchQueueLagMs)
                 : 0;
+            double alignedMs = deviceClock.EstimateLatestSampleAgeMilliseconds(
+                PpgMonotonicClockAligner.HostNowMilliseconds());
+            LastPublishedAlignedSampleAgeAtPublishSeconds =
+                double.IsNaN(alignedMs) || double.IsInfinity(alignedMs)
+                    ? float.NaN : (float)(alignedMs / 1000.0);
             OnMeasurement?.Invoke(LastMeasurement);
 
 
