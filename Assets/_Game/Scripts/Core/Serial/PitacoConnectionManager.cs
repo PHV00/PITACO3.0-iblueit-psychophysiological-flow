@@ -52,10 +52,13 @@ namespace Ibit.Core.Serial
         private SerialControllerPitaco24 modern;
         private Version activeVersion;
         private int pendingLines;
+        private int maxPendingObserved;
         private long droppedLines;
 
         public Version ConnectedVersion => activeVersion;
         public long DroppedLines => Interlocked.Read(ref droppedLines);
+        public int PendingLines => Volatile.Read(ref pendingLines);
+        public int MaxPendingObserved => Volatile.Read(ref maxPendingObserved);
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -212,6 +215,8 @@ namespace Ibit.Core.Serial
                         return;
                     }
                     pendingLines++;
+                    if (pendingLines > maxPendingObserved)
+                        maxPendingObserved = pendingLines;
                 }
                 inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version,
                     Text = text, EnqueuedTicks = receivedTicks });
