@@ -25,8 +25,9 @@ namespace Ibit.Core.Oximetry.UI
         private string lastRenderState;
         private float nextRenderDiagnosticAt;
 
-        // Retain current scene Player semantics; no second publication clock.
-        // Numeric values are already refreshed every 1 s by the Player.
+        // Only legacy oximeter uses the per-scene Player text. PITACO 2.4 HUD
+        // reads coordinator measurements directly, avoiding a second 1s cache.
+        // Mixer continues to use the separate source-aware Bridge.
         protected abstract string ReadPlayerText(bool pitaco24Connected);
 
         protected virtual void Update()
@@ -118,14 +119,13 @@ namespace Ibit.Core.Oximetry.UI
                 return;
             }
 
-            string playerText = ReadPlayerText(true);
-            if (string.IsNullOrEmpty(playerText))
-            {
-                var current = coordinator.HudMeasurement;
-                playerText = FormatPitaco24Values(
-                    current.BpmEstimate, current.SpO2DemoPercent);
-            }
-            SetText(playerText, "LIVE");
+            // Display the coordinator's most recent published estimate, not
+            // the Player's independent 1-second visual cache. The same validated
+            // measurement now reaches all three game scenes without a stale
+            // intermediary or misleading last-value lag.
+            var live = coordinator.HudMeasurement;
+            SetText(ConnectedPrefix + FormatPitaco24Values(
+                live.BpmEstimate, live.SpO2DemoPercent), "LIVE");
         }
 
         private void SetText(string value, string state)
@@ -143,6 +143,7 @@ namespace Ibit.Core.Oximetry.UI
                 Debug.Log("[PPG-HUD] t=" + Time.unscaledTime.ToString("F2") +
                     " | scene=" + gameObject.scene.name +
                     " | object=" + gameObject.name +
+                    " | frame=" + Time.frameCount +
                     " | state=" + state +
                     " | contact=" + (coordinator != null && coordinator.OpticalContactConfirmed) +
                     " | g1=" + (coordinator != null ? coordinator.Gate01Status : "none") +
