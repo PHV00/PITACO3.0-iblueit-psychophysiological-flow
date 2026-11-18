@@ -175,11 +175,28 @@ namespace Ibit.Core.Oximetry
         public string Gate01Status => gate01State.ToString();
         public int LastGate01Reason => lastGate01Reason;
         public int LastGate01Samples => lastGate01Samples;
+        // G1 firmware frames arrive just AFTER the last sample in the same
+        // 5-second window. There may be 1-3 Unity frames before the next
+        // sample reaches the coordinator. A small negative device delta is
+        // not an expired/failed G1: the firmware has just approved that
+        // preceding window. Avoid a one-frame HUD/Bridge "G1_BLOCK" flicker.
+        //
+        // This applies ONLY to the public status/snapshot predicate.
+        // IsGate01ApprovedForSample stays strict: no estimator runs on
+        // a sample whose device timestamp is earlier than the G1 stamp.
+        private const int Gate01PreSampleDisplayToleranceMs = 120;
         public bool Gate01Approved => gate01State == Gate01State.Passed &&
             gate01Received && hasObservedDeviceMs &&
             lastSampleReceivedAt >= 0f &&
             Time.unscaledTime - lastSampleReceivedAt <= TelemetryTimeoutSeconds &&
-            IsDeviceGateAgeFresh(lastObservedDeviceMs);
+            IsDeviceGateAgeFreshForStatus(lastObservedDeviceMs);
+
+        private bool IsDeviceGateAgeFreshForStatus(uint sampleDeviceMs)
+        {
+            int ageMs = unchecked((int)(sampleDeviceMs - lastGate01TimeMs));
+            return ageMs >= -Gate01PreSampleDisplayToleranceMs &&
+                ageMs <= Gate01MaxAgeMs;
+        }
 
         private bool IsDeviceGateAgeFresh(uint sampleDeviceMs)
         {
