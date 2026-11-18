@@ -208,7 +208,8 @@ namespace Ibit.Core.Oximetry.Integration
                 object.ReferenceEquals(current, lastPublished);
             bool bpmHudHold = ppg != null && ppg.HudHoldingRejectedBpm;
             float publicationAge = lastPitacoPublicationAt >= 0f
-                ? Time.unscaledTime - lastPitacoPublicationAt
+                ? Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt) +
+                  lastPitacoPublicationQueueLagMs / 1000f
                 : float.PositiveInfinity;
 
             string cause;
