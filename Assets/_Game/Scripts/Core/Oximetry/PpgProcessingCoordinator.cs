@@ -57,6 +57,9 @@ namespace Ibit.Core.Oximetry
         private sealed class SqiPayload
         {
             public bool contact;
+            // Explicit device quality-session identifier (new firmware).
+            // Older firmware omits this field; retain legacy conservative path.
+            public int epoch;
             // Frame-specific G1 reason is useful for detecting firmware resets.
             // Do not deserialize sample.sqi.g1 here: it can be JSON null.
             public int reason;
@@ -68,6 +71,7 @@ namespace Ibit.Core.Oximetry
         private sealed class Gate01SqiPayload
         {
             public bool g1;
+            public int epoch;
             public int reason;
             public int samples;
         }
@@ -160,6 +164,8 @@ namespace Ibit.Core.Oximetry
         private int lastGate01Reason = -1;
         private int lastGate01Samples;
         private int lastGate01Window = -1;
+        private int lastGate01Epoch = -1;
+        private bool gate01EpochReported;
         // Last valid-in-range device timestamp observed on a sample. Diagnostic
         // only: device time and Unity arrival time are different clock domains.
         private uint lastObservedDeviceMs;
@@ -377,6 +383,8 @@ namespace Ibit.Core.Oximetry
             lastGate01Reason = -1;
             lastGate01Samples = 0;
             lastGate01Window = -1;
+            lastGate01Epoch = -1;
+            gate01EpochReported = false;
         }
 
         private void ResetMeasurements(string status)
@@ -442,6 +450,20 @@ namespace Ibit.Core.Oximetry
 
             bool hadPriorGate = gate01Received;
             bool recoveringStale = gate01State == Gate01State.Stale;
+            bool incomingEpochReported = json.IndexOf("\"epoch\":",
+                StringComparison.Ordinal) >= 0;
+            int incomingEpoch = result.sqi.epoch;
+            if (incomingEpochReported && (incomingEpoch < 0 || incomingEpoch > 65535))
+            {
+                rejectedGate01Frames++;
+                return;
+            }
+            int previousEpoch = lastGate01Epoch;
+            bool previousEpochReported = gate01EpochReported;
+            bool epochCompatible = !hadPriorGate ||
+                (!previousEpochReported && !incomingEpochReported) ||
+                (previousEpochReported && incomingEpochReported &&
+                 incomingEpoch == previousEpoch);
             uint previousGateDeviceMs = lastGate01TimeMs;
             int previousGateWindow = lastGate01Window;
             float previousGateArrivalAt = lastGate01ArrivalAt;
@@ -452,6 +474,8 @@ namespace Ibit.Core.Oximetry
                 deviceDeltaMs >= 3500 && deviceDeltaMs <= Gate01MaxAgeMs;
 
             gate01Received = true;
+            gate01EpochReported = incomingEpochReported;
+            lastGate01Epoch = incomingEpochReported ? incomingEpoch : -1;
             lastGate01Window = result.window;
             lastGate01TimeMs = deviceMs;
             lastGate01ArrivalAt = Time.unscaledTime;
@@ -476,12 +500,21 @@ namespace Ibit.Core.Oximetry
                     " | previousState=" + (recoveringStale ? "Stale" : gate01State.ToString()) +
                     " | serialPending=" +
                     (PitacoConnectionManager.Active != null ? PitacoConnectionManager.Active.PendingLines : 0));
+            if (hadPriorGate && !epochCompatible)
+            {
+                Trace("G1_EPOCH_CHANGED", "old=" +
+                    (previousEpochReported ? previousEpoch.ToString() : "legacy") +
+                    " | next=" +
+                    (incomingEpochReported ? incomingEpoch.ToString() : "legacy") +
+                    " | reason=FIRMWARE_QUALITY_SESSION_CHANGED");
+                InvalidatePpgWindow("Sessao de qualidade G1 alterada");
+            }
             if (recoveringStale)
             {
                 int retained = buffer.Count;
                 // Never re-use raw samples across an unknown/missing G1
                 // interval, even when the next verdict is PASS.
-                bool reuse = approved && adjacentFirmwareWindow;
+                bool reuse = approved && adjacentFirmwareWindow && epochCompatible;
                 if (!reuse)
                     InvalidatePpgWindow("G1 intervalo ausente/reprovado na recuperacao");
                 Trace("G1_RECOVERY", "nextPassed=" + approved +
@@ -495,6 +528,7 @@ namespace Ibit.Core.Oximetry
                 "window=" + result.window + " | devMs=" + deviceMs +
                 " | samples=" + lastGate01Samples +
                 " | reason=" + lastGate01Reason +
+                " | epoch=" + (gate01EpochReported ? lastGate01Epoch.ToString() : "legacy") +
                 " | bufferBefore=" + buffer.Count + " | " + stats);
             if (!approved)
             {
@@ -504,13 +538,32 @@ namespace Ibit.Core.Oximetry
             }
         }
 
-        private PpgAction DecideG1Action(uint sampleTimeMs, int sampleReason)
+        private PpgAction DecideG1Action(uint sampleTimeMs, int sampleReason,
+            bool sampleEpochReported, int sampleEpoch)
         {
-            // After firmware contact reacquisition, sample.sqi.reason=1
-            // means its G1 accumulator was restarted. The old PASS is no
-            // longer valid even if the optical contact is currently true.
-            if (gate01State == Gate01State.Passed && sampleReason != 0)
+            if (gate01State == Gate01State.Passed && gate01EpochReported &&
+                sampleEpochReported && sampleEpoch != lastGate01Epoch)
+            {
+                Trace("G1_EPOCH_CHANGED", "expected=" + lastGate01Epoch +
+                    " | sample=" + sampleEpoch + " | devMs=" + sampleTimeMs);
                 return PpgAction.Reset;
+            }
+            if (gate01State == Gate01State.Passed && sampleReason != 0)
+            {
+                if (gate01EpochReported && sampleEpochReported &&
+                    sampleEpoch == lastGate01Epoch && sampleReason == 1)
+                {
+                    // The firmware still reports waiting inside the SAME
+                    // quality epoch: suspend, NEVER accept the prior PASS
+                    // until another authoritative G1 verdict arrives.
+                    Trace("G1_REASON_WAIT", "reason=1 | epoch=" +
+                        sampleEpoch + " | devMs=" + sampleTimeMs);
+                    MarkGate01Stale();
+                    return PpgAction.Suspend;
+                }
+                // Old firmware has no epoch. Stay conservative.
+                return PpgAction.Reset;
+            }
             return IsGate01ApprovedForSample(sampleTimeMs)
                 ? PpgAction.Allow : PpgAction.Suspend;
         }
@@ -682,12 +735,17 @@ namespace Ibit.Core.Oximetry
             // expiry invalidates the preceding segment only once. Waiting and
             // Failed states may accumulate candidate samples after the most
             // recent invalidation, but they never authorize estimates.
-            PpgAction action = DecideG1Action(sample.TimeMs, frame.sqi.reason);
+            bool sampleEpochReported = json.IndexOf("\"epoch\":",
+                StringComparison.Ordinal) >= 0;
+            PpgAction action = DecideG1Action(sample.TimeMs,
+                frame.sqi.reason, sampleEpochReported, frame.sqi.epoch);
             if (action == PpgAction.Reset)
             {
                 Trace("G1_REVOKED", "seq=" + frame.seq +
                     " | devMs=" + frame.t_ms +
-                    " | sampleReason=" + frame.sqi.reason);
+                    " | sampleReason=" + frame.sqi.reason +
+                    " | g1Epoch=" + (gate01EpochReported ? lastGate01Epoch.ToString() : "legacy") +
+                    " | sampleEpoch=" + (sampleEpochReported ? frame.sqi.epoch.ToString() : "legacy"));
                 ResetGate01();
                 InvalidatePpgWindow("G1 reiniciado/invalidado pelo firmware");
                 action = PpgAction.Suspend;
