@@ -71,7 +71,13 @@ namespace Ibit.Core.Oximetry.Integration
 
         public static void ConfigureDemoSpo2LegacyRulesForTesting(bool enabled)
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             EnableDemoSpo2LegacyRulesForTesting = enabled;
+#else
+            // Never allow DEMO oxygenation to drive patient-facing gameplay
+            // adaptations in a normal release build.
+            EnableDemoSpo2LegacyRulesForTesting = false;
+#endif
         }
 
         // Unity publication time alone is insufficient when serial frames
