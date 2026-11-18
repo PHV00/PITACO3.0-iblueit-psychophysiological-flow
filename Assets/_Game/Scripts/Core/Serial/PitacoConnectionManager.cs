@@ -53,12 +53,19 @@ namespace Ibit.Core.Serial
         private Version activeVersion;
         private int pendingLines;
         private int maxPendingObserved;
+        private double lastDrainMs;
+        private double maxDrainMs;
+        private int lastDrainedPackets;
         private long droppedLines;
 
         public Version ConnectedVersion => activeVersion;
         public long DroppedLines => Interlocked.Read(ref droppedLines);
         public int PendingLines => Volatile.Read(ref pendingLines);
         public int MaxPendingObserved => Volatile.Read(ref maxPendingObserved);
+        // Frame-level execution metrics: includes Unity JSON consumers and logs.
+        public double LastDrainMs => lastDrainMs;
+        public double MaxDrainMs => maxDrainMs;
+        public int LastDrainedPackets => lastDrainedPackets;
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -153,6 +160,8 @@ namespace Ibit.Core.Serial
             if (Time.frameCount % 60 == 0)
                 BindControllers();
             int count = Math.Max(1, maxLinesPerFrame);
+            long drainStarted = Stopwatch.GetTimestamp();
+            int drained = 0;
             for (int i = 0; i < count; ++i)
             {
                 Packet packet;
@@ -162,6 +171,7 @@ namespace Ibit.Core.Serial
                     packet = inbound.Dequeue();
                     if (packet.Kind == PacketKind.Line) pendingLines--;
                 }
+                ++drained;
 
                 switch (packet.Kind)
                 {
@@ -191,6 +201,10 @@ namespace Ibit.Core.Serial
                         break;
                 }
             }
+            lastDrainedPackets = drained;
+            lastDrainMs = (Stopwatch.GetTimestamp() - drainStarted) *
+                1000.0 / Stopwatch.Frequency;
+            if (lastDrainMs > maxDrainMs) maxDrainMs = lastDrainMs;
         }
 
         private static bool IsNumericPressure(string line)
