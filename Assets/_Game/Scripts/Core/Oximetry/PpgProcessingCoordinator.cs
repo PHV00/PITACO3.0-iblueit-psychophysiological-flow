@@ -138,7 +138,17 @@ namespace Ibit.Core.Oximetry
         // 5-second G1 cadence plus 1.5 s of delivery tolerance.
         // Experimental parameter; reevaluate with real hardware logs.
         private const uint Gate01MaxAgeMs = 6500;
-        private const float Gate01MaxAgeSeconds = 6.5f;
+        // Device t_ms, not Unity frame time, decides G1 age per sample.
+        private const float TelemetryFreshnessSeconds = 3f;
+        private const double SerialQueueDiagnosticThresholdMs = 250.0;
+        private const double SerialQueuePublicationLimitMs = 2000.0;
+        private double lastJsonQueueAgeMs;
+        private double maxJsonQueueAgeMs;
+        private long jsonFramesOverQueueAgeLimit;
+        private bool serialQueueDelayed;
+        private uint lastObservedSampleDeviceMs;
+        private bool hasObservedSampleDeviceMs;
+        private bool samplingRateAnomalyActive;
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
         // HUD-only hold: protects against a 1-2-sample contact flicker, not
@@ -156,7 +166,6 @@ namespace Ibit.Core.Oximetry
         private Gate01State gate01State = Gate01State.Waiting;
         private bool gate01Received;
         private uint lastGate01TimeMs;
-        private float lastGate01ArrivalAt = -1f;
         private int lastGate01Reason = -1;
         private int lastGate01Samples;
         private long gate01Frames;
@@ -166,9 +175,27 @@ namespace Ibit.Core.Oximetry
         public string Gate01Status => gate01State.ToString();
         public int LastGate01Reason => lastGate01Reason;
         public int LastGate01Samples => lastGate01Samples;
-        public bool Gate01Approved => gate01State == Gate01State.Passed &&
-            gate01Received && lastGate01ArrivalAt >= 0f &&
-            Time.unscaledTime - lastGate01ArrivalAt <= Gate01MaxAgeSeconds;
+        public bool Gate01Approved
+        {
+            get
+            {
+                if (gate01State != Gate01State.Passed || !gate01Received ||
+                    lastSampleReceivedAt < 0f ||
+                    Time.unscaledTime - lastSampleReceivedAt > TelemetryFreshnessSeconds ||
+                    lastJsonQueueAgeMs > SerialQueuePublicationLimitMs)
+                    return false;
+
+                // A sample may precede the G1 verdict by a few milliseconds.
+                if (hasObservedSampleDeviceMs)
+                {
+                    int deviceAge = unchecked((int)(lastObservedSampleDeviceMs -
+                        lastGate01TimeMs));
+                    if (deviceAge > (int)Gate01MaxAgeMs)
+                        return false;
+                }
+                return true;
+            }
+        }
 
         public PpgMeasurement LastMeasurement { get; private set; }
 
@@ -210,7 +237,7 @@ namespace Ibit.Core.Oximetry
             }
 
             if (lastSampleReceivedAt >= 0f &&
-                Time.unscaledTime - lastSampleReceivedAt > 3f)
+                Time.unscaledTime - lastSampleReceivedAt > TelemetryFreshnessSeconds)
             {
                 // ResetMeasurements sets the heartbeat to -1, so this event
                 // fires only once until optical frames resume.
@@ -221,10 +248,9 @@ namespace Ibit.Core.Oximetry
                 ResetMeasurements("Sem amostras PPG recentes");
             }
 
-            if (gate01State == Gate01State.Passed &&
-                lastGate01ArrivalAt >= 0f &&
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds)
-                MarkGate01Stale();
+            // No Unity-wall-clock G1 expiry: sample device timestamps
+            // determine G1 validity. The 3s telemetry watchdog above
+            // independently handles genuinely missing samples.
 
             if (Time.unscaledTime >= nextLogTime)
             {
@@ -237,6 +263,15 @@ namespace Ibit.Core.Oximetry
                     (PitacoConnectionManager.Active != null
                         ? PitacoConnectionManager.Active.DroppedLines
                         : serialController != null ? serialController.DroppedMessages : 0) +
+                    " | queuePending=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PendingLines : 0) +
+                    " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                    " | queuePeakMs=" + maxJsonQueueAgeMs.ToString("F1") +
+                    " | queuedOver2s=" + jsonFramesOverQueueAgeLimit +
+                    " | linesLastFrame=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.LastFrameLineCount : 0) +
+                    " | linesPeakFrame=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PeakFrameLineCount : 0) +
                     " | g1Frames=" + gate01Frames +
                     " | blockedByG1=" + blockedByGate01 +
                     " | contactFalse=" + missingContactFrames +
@@ -337,7 +372,6 @@ namespace Ibit.Core.Oximetry
             gate01State = Gate01State.Waiting;
             gate01Received = false;
             lastGate01TimeMs = 0;
-            lastGate01ArrivalAt = -1f;
             lastGate01Reason = -1;
             lastGate01Samples = 0;
         }
@@ -349,6 +383,10 @@ namespace Ibit.Core.Oximetry
             consecutiveNoContactSamples = 0;
             pendingShortContactGaps = 0;
             lastSampleReceivedAt = -1f;
+            hasObservedSampleDeviceMs = false;
+            lastJsonQueueAgeMs = 0.0;
+            serialQueueDelayed = false;
+            samplingRateAnomalyActive = false;
             ResetGate01();
         }
 
@@ -357,9 +395,12 @@ namespace Ibit.Core.Oximetry
             if (gate01State != Gate01State.Passed) return;
             ClearHudContactHold();
             gate01State = Gate01State.Stale;
-            Trace("G1_EXPIRED", "ageS=" +
-                (Time.unscaledTime - lastGate01ArrivalAt).ToString("F2") +
-                " | bufferRetained=" + buffer.Count);
+            Trace("G1_EXPIRED", "clock=DEVICE | lastGateDevMs=" +
+                lastGate01TimeMs + " | lastSampleDevMs=" +
+                lastObservedSampleDeviceMs + " | ageDeviceMs=" +
+                unchecked(lastObservedSampleDeviceMs - lastGate01TimeMs) +
+                " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                " | bufferBefore=" + buffer.Count);
             // The RAW diagnostic probe is preserved; the processing window
             // cannot mix an interval authorized by this expired PASS with
             // later candidate samples. One reset per transition to Stale.
@@ -394,7 +435,6 @@ namespace Ibit.Core.Oximetry
 
             gate01Received = true;
             lastGate01TimeMs = deviceMs;
-            lastGate01ArrivalAt = Time.unscaledTime;
             lastGate01Reason = result.sqi.reason;
             lastGate01Samples = result.sqi.samples;
             gate01Frames++;
@@ -436,9 +476,10 @@ namespace Ibit.Core.Oximetry
         {
             if (gate01State != Gate01State.Passed || !gate01Received)
                 return false;
-            if (lastGate01ArrivalAt < 0f ||
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds ||
-                unchecked(sampleTimeMs - lastGate01TimeMs) > Gate01MaxAgeMs)
+            int ageDeviceMs = unchecked((int)(sampleTimeMs - lastGate01TimeMs));
+            if (ageDeviceMs < 0)
+                return false; // Sample predates this G1 verdict; do not revoke.
+            if (ageDeviceMs > (int)Gate01MaxAgeMs)
             {
                 MarkGate01Stale();
                 return false;
@@ -452,6 +493,25 @@ namespace Ibit.Core.Oximetry
             // independently; no second USB stream or software G1 calculation.
             if (string.IsNullOrEmpty(json)) return;
             jsonCallbacksReceived++;
+
+            // Measured by the serial worker thread's monotonic timestamp.
+            // Unlike Time.unscaledTime, this includes main-thread stalls.
+            lastJsonQueueAgeMs = serialController != null
+                ? Math.Max(0.0, serialController.LastJsonQueueAgeMs) : 0.0;
+            if (lastJsonQueueAgeMs > maxJsonQueueAgeMs)
+                maxJsonQueueAgeMs = lastJsonQueueAgeMs;
+            if (lastJsonQueueAgeMs > SerialQueuePublicationLimitMs)
+                ++jsonFramesOverQueueAgeLimit;
+            bool delayed = lastJsonQueueAgeMs > SerialQueueDiagnosticThresholdMs;
+            if (delayed != serialQueueDelayed)
+            {
+                serialQueueDelayed = delayed;
+                Trace(delayed ? "SERIAL_QUEUE_DELAY" : "SERIAL_QUEUE_RECOVERED",
+                    "queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                    " | maxMs=" + maxJsonQueueAgeMs.ToString("F1") +
+                    " | pending=" + (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PendingLines : 0));
+            }
 
             SampleFrame frame;
             try { frame = JsonUtility.FromJson<SampleFrame>(json); }
@@ -486,6 +546,11 @@ namespace Ibit.Core.Oximetry
             // Update before evaluating contact, validity or G1; contact=false
             // still proves the JSON stream is alive.
             lastSampleReceivedAt = Time.unscaledTime;
+            if (frame.t_ms >= 0 && frame.t_ms <= uint.MaxValue)
+            {
+                lastObservedSampleDeviceMs = (uint)frame.t_ms;
+                hasObservedSampleDeviceMs = true;
+            }
 
             // Capture EVERY delivered RED/IR pair before contact/G1 filtering.
             // This history is independent of the 8s processing buffer, so a
@@ -642,6 +707,26 @@ namespace Ibit.Core.Oximetry
                 return;
             }
 
+            // The main thread can drain historical JSON after a stall.
+            // Retain its samples for diagnosis/window continuity but do not
+            // publish an old physiological estimate as a current reading.
+            if (lastJsonQueueAgeMs > SerialQueuePublicationLimitMs)
+            {
+                ClearHudContactHold();
+                LastMeasurement = new PpgMeasurement(sample.TimeMs, 0, null,
+                    null, null, 0, "Fila serial atrasada: medicao nao atual");
+                string backlogDecision = "SERIAL_BACKLOG";
+                if (ShouldTraceCalculation(backlogDecision))
+                    TraceCalculation(backlogDecision, "stage=SERIAL_BACKLOG" +
+                        " | seq=" + sample.Sequence +
+                        " | devMs=" + sample.TimeMs +
+                        " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1") +
+                        " | pending=" + (PitacoConnectionManager.Active != null
+                            ? PitacoConnectionManager.Active.PendingLines : 0) +
+                        " | buffer=" + buffer.Count);
+                return;
+            }
+
             if (hasPreviousProcessingTime &&
                 unchecked(sample.TimeMs - previousProcessingMs) < RecalculationPeriodMs)
                 return;
@@ -661,6 +746,23 @@ namespace Ibit.Core.Oximetry
                         " | devMs=" + sample.TimeMs +
                         " | buffer=" + buffer.Count);
                 return;
+            }
+
+            // Diagnostic only: explains occasional 27.79 Hz / 228-slot
+            // windows without modifying the BPM estimator or sample buffer.
+            bool fsHigh = processed.SamplingHz > 26.0;
+            if (fsHigh != samplingRateAnomalyActive)
+            {
+                samplingRateAnomalyActive = fsHigh;
+                PpgSample first = buffer.Samples[0];
+                PpgSample last = buffer.Samples[buffer.Count - 1];
+                Trace(fsHigh ? "FS_ANOMALY" : "FS_RECOVERED",
+                    "fs=" + processed.SamplingHz.ToString("F2") +
+                    " | buffer=" + buffer.Count +
+                    " | seqDelta=" + ((last.Sequence - first.Sequence) & 0xFFFF) +
+                    " | windowMs=" + unchecked(last.TimeMs - first.TimeMs) +
+                    " | reconstructed=" + processed.ReconstructedSamples +
+                    " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1"));
             }
 
             previousProcessingMs = sample.TimeMs;
