@@ -67,6 +67,39 @@ public static class PpgCriticalHardeningSmokeTests
                 OximetrySnapshotFactory.SelectForLegacyRules(safe, legacy).Source ==
                     OximetrySource.LegacyOximeter);
 
+            // Exercise the unchanged 8-second estimator on deterministic
+            // synthetic PPG, independently of the USB worker and scene.
+            var clean = new System.Collections.Generic.List<PpgSample>();
+            for (int i = 0; i <= 200; ++i)
+            {
+                double phase = 2.0 * Math.PI * 55.0 * (i / 25.0) / 60.0;
+                int red = 97000 + (int)(240.0 * Math.Sin(phase));
+                int ir = 112000 + (int)(400.0 * Math.Sin(phase));
+                clean.Add(new PpgSample((ushort)i, (uint)(i * 40), red, ir));
+            }
+            PpgProcessedWindow processed;
+            string reason;
+            Check("8-second clean PPG processing succeeds",
+                PpgSignalProcessor.TryProcess(clean, out processed, out reason));
+            double bpm, corr;
+            Check("clean synthetic BPM recovered",
+                BpmEstimator.TryEstimate(processed, out bpm, out corr) &&
+                Math.Abs(bpm - 55.0) < 4.0 && corr > 0.57);
+
+            var shortWindow = new System.Collections.Generic.List<PpgSample>(clean);
+            shortWindow.RemoveAt(shortWindow.Count - 1);
+            Check("shorter than 8 seconds is not authorized",
+                !PpgSignalProcessor.TryProcess(shortWindow,
+                    out processed, out reason));
+
+            var brokenSequence = new System.Collections.Generic.List<PpgSample>(clean);
+            PpgSample broken = brokenSequence[100];
+            brokenSequence[100] = new PpgSample((ushort)(broken.Sequence + 4),
+                broken.TimeMs, broken.Red, broken.Ir);
+            Check("sequence discontinuity is rejected",
+                !PpgSignalProcessor.TryProcess(brokenSequence,
+                    out processed, out reason));
+
             Debug.Log("[PPG-TEST] PASS: " + passed +
                 " critical-hardening smoke assertions (Edit Mode).");
         }
