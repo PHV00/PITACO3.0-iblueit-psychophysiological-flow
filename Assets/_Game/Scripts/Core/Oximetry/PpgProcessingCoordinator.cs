@@ -237,6 +237,10 @@ namespace Ibit.Core.Oximetry
                     (PitacoConnectionManager.Active != null
                         ? PitacoConnectionManager.Active.DroppedLines
                         : serialController != null ? serialController.DroppedMessages : 0) +
+                    " | serialPending=" + (PitacoConnectionManager.Active != null ? PitacoConnectionManager.Active.PendingLines : 0) +
+                    " | serialPeakPending=" + (PitacoConnectionManager.Active != null ? PitacoConnectionManager.Active.PeakPendingLines : 0) +
+                    " | serialPeakQueueLagMs=" + (PitacoConnectionManager.Active != null ? PitacoConnectionManager.Active.PeakQueueLagMs : 0) +
+                    " | serialBudgetExhaustions=" + (PitacoConnectionManager.Active != null ? PitacoConnectionManager.Active.QueueBudgetExhaustions : 0) +
                     " | g1Frames=" + gate01Frames +
                     " | blockedByG1=" + blockedByGate01 +
                     " | contactFalse=" + missingContactFrames +
