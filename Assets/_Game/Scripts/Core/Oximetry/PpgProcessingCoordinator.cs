@@ -897,10 +897,12 @@ namespace Ibit.Core.Oximetry
             }
             else
             {
+                int previousRejections = consecutiveBpmRejections;
                 consecutiveBpmRejections = Math.Min(
                     HudBpmRejectInvalidationCount, consecutiveBpmRejections + 1);
-                if (consecutiveBpmRejections == 1 ||
-                    consecutiveBpmRejections == HudBpmRejectInvalidationCount)
+                // Emit 1, 2 and 3 exactly once each; do not spam every
+                // 400-ms calculation after the streak saturates at three.
+                if (consecutiveBpmRejections != previousRejections)
                 {
                     bool holdEligible = consecutiveBpmRejections <
                         HudBpmRejectInvalidationCount &&
