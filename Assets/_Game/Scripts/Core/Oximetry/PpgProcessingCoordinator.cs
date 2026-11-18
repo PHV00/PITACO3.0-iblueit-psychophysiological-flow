@@ -148,6 +148,7 @@ namespace Ibit.Core.Oximetry
         private bool serialQueueDelayed;
         private uint lastObservedSampleDeviceMs;
         private bool hasObservedSampleDeviceMs;
+        private bool samplingRateAnomalyActive;
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
         // HUD-only hold: protects against a 1-2-sample contact flicker, not
@@ -387,6 +388,7 @@ namespace Ibit.Core.Oximetry
             hasObservedSampleDeviceMs = false;
             lastJsonQueueAgeMs = 0.0;
             serialQueueDelayed = false;
+            samplingRateAnomalyActive = false;
             ResetGate01();
         }
 
@@ -747,6 +749,23 @@ namespace Ibit.Core.Oximetry
                         " | devMs=" + sample.TimeMs +
                         " | buffer=" + buffer.Count);
                 return;
+            }
+
+            // Diagnostic only: explains occasional 27.79 Hz / 228-slot
+            // windows without modifying the BPM estimator or sample buffer.
+            bool fsHigh = processed.SamplingHz > 26.0;
+            if (fsHigh != samplingRateAnomalyActive)
+            {
+                samplingRateAnomalyActive = fsHigh;
+                PpgSample first = buffer.Samples[0];
+                PpgSample last = buffer.Samples[buffer.Count - 1];
+                Trace(fsHigh ? "FS_ANOMALY" : "FS_RECOVERED",
+                    "fs=" + processed.SamplingHz.ToString("F2") +
+                    " | buffer=" + buffer.Count +
+                    " | seqDelta=" + ((last.Sequence - first.Sequence) & 0xFFFF) +
+                    " | windowMs=" + unchecked(last.TimeMs - first.TimeMs) +
+                    " | reconstructed=" + processed.ReconstructedSamples +
+                    " | queueAgeMs=" + lastJsonQueueAgeMs.ToString("F1"));
             }
 
             previousProcessingMs = sample.TimeMs;
