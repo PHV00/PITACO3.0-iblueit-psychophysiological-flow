@@ -110,6 +110,20 @@ namespace Ibit.Core.Oximetry.UI
                 return;
             }
 
+            if (coordinator.HudHoldingRejectedBpm)
+            {
+                // First/second invalid sliding-window verdict: previous BPM
+                // is shown as an explicitly historical value, never as live.
+                // Bridge/Mixer continue to see null for rejected BPM.
+                var latest = coordinator.HudMeasurement;
+                SetText(ConnectedPrefix + FormatPitaco24Values(
+                    coordinator.HudRetainedBpmVisualOnly,
+                    latest != null ? latest.SpO2DemoPercent : null) +
+                    "\nPPG: BPM ultima leitura (estimador reavaliando)",
+                    "BPM_HOLD_VISUAL_ONLY");
+                return;
+            }
+
             if (!coordinator.HudHasRecentLiveMeasurement)
             {
                 // Explicit unavailable state instead of an unexplained HUD
@@ -147,6 +161,17 @@ namespace Ibit.Core.Oximetry.UI
                     " | state=" + state +
                     " | contact=" + (coordinator != null && coordinator.OpticalContactConfirmed) +
                     " | g1=" + (coordinator != null ? coordinator.Gate01Status : "none") +
+                    " | bpmRejectStreak=" +
+                    (coordinator != null ? coordinator.ConsecutiveBpmRejections : 0) +
+                    " | bpmThreshold=" +
+                    (coordinator != null
+                        ? coordinator.ActiveBpmAutocorrelationThreshold.ToString("F2")
+                        : "--") +
+                    " | bpmHeldVisualOnly=" +
+                    (coordinator != null && coordinator.HudHoldingRejectedBpm) +
+                    " | bpmHeldValue=" +
+                    (coordinator != null && coordinator.HudRetainedBpmVisualOnly.HasValue
+                        ? coordinator.HudRetainedBpmVisualOnly.Value.ToString("F1") : "--") +
                     " | candidateBpm=" +
                     (measurement != null && measurement.BpmEstimate.HasValue
                         ? measurement.BpmEstimate.Value.ToString("F1") : "--") +
