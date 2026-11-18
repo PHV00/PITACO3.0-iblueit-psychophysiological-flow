@@ -743,7 +743,7 @@ namespace Ibit.Core.Oximetry
                         serialManager.CurrentDispatchArrivalTicks));
                 if (observation == PpgClockObservation.DeviceRestart)
                 {
-                    Trace("CLOCK_DEVICE_RESTART", "seq=" + frame.seq +
+                    Trace("CLOCK_EPOCH_RESET", "seq=" + frame.seq +
                         " | devMs=" + frame.t_ms +
                         " | resets=" + deviceClock.DeviceRestarts +
                         " | action=G1_AND_BUFFER_RESET");
