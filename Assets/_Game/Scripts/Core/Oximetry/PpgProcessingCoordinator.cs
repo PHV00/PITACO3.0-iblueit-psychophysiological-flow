@@ -135,10 +135,10 @@ namespace Ibit.Core.Oximetry
         private long invalidSampleFrames;
         private string lastJsonType = "nenhum";
         private const uint RecalculationPeriodMs = 400;
-        // 5-second G1 cadence plus 1.5 s of delivery tolerance.
-        // Experimental parameter; reevaluate with real hardware logs.
+        // G1 cadence is defined by PITACO device timestamps, not the Unity
+        // frame clock (which can stall while the USB worker keeps receiving).
         private const uint Gate01MaxAgeMs = 6500;
-        private const float Gate01MaxAgeSeconds = 6.5f;
+        private const float TelemetryTimeoutSeconds = 3f;
         private const int Gate01MinimumSamples = 50;
         private const int ContactLossConfirmationSamples = 3;
         // HUD-only hold: protects against a 1-2-sample contact flicker, not
@@ -172,8 +172,16 @@ namespace Ibit.Core.Oximetry
         public int LastGate01Reason => lastGate01Reason;
         public int LastGate01Samples => lastGate01Samples;
         public bool Gate01Approved => gate01State == Gate01State.Passed &&
-            gate01Received && lastGate01ArrivalAt >= 0f &&
-            Time.unscaledTime - lastGate01ArrivalAt <= Gate01MaxAgeSeconds;
+            gate01Received && hasObservedDeviceMs &&
+            lastSampleReceivedAt >= 0f &&
+            Time.unscaledTime - lastSampleReceivedAt <= TelemetryTimeoutSeconds &&
+            IsDeviceGateAgeFresh(lastObservedDeviceMs);
+
+        private bool IsDeviceGateAgeFresh(uint sampleDeviceMs)
+        {
+            int ageMs = unchecked((int)(sampleDeviceMs - lastGate01TimeMs));
+            return ageMs >= 0 && ageMs <= Gate01MaxAgeMs;
+        }
 
         public PpgMeasurement LastMeasurement { get; private set; }
 
@@ -215,7 +223,9 @@ namespace Ibit.Core.Oximetry
             }
 
             if (lastSampleReceivedAt >= 0f &&
-                Time.unscaledTime - lastSampleReceivedAt > 3f)
+                Time.unscaledTime - lastSampleReceivedAt > TelemetryTimeoutSeconds &&
+                (PitacoConnectionManager.Active == null ||
+                 PitacoConnectionManager.Active.PendingLines == 0))
             {
                 // ResetMeasurements sets the heartbeat to -1, so this event
                 // fires only once until optical frames resume.
@@ -226,9 +236,11 @@ namespace Ibit.Core.Oximetry
                 ResetMeasurements("Sem amostras PPG recentes");
             }
 
-            if (gate01State == Gate01State.Passed &&
-                lastGate01ArrivalAt >= 0f &&
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds)
+            // A delayed Update() is not proof of an expired firmware gate.
+            // The sensor's own monotonic timeline decides G1 expiry; actual
+            // lack of telemetry is handled independently above.
+            if (gate01State == Gate01State.Passed && hasObservedDeviceMs &&
+                unchecked((int)(lastObservedDeviceMs - lastGate01TimeMs)) > Gate01MaxAgeMs)
                 MarkGate01Stale();
 
             if (Time.unscaledTime >= nextLogTime)
@@ -507,9 +519,7 @@ namespace Ibit.Core.Oximetry
         {
             if (gate01State != Gate01State.Passed || !gate01Received)
                 return false;
-            if (lastGate01ArrivalAt < 0f ||
-                Time.unscaledTime - lastGate01ArrivalAt > Gate01MaxAgeSeconds ||
-                unchecked(sampleTimeMs - lastGate01TimeMs) > Gate01MaxAgeMs)
+            if (!IsDeviceGateAgeFresh(sampleTimeMs))
             {
                 MarkGate01Stale();
                 return false;
