@@ -92,3 +92,64 @@ ou é reprovado, e **não** modifica o período G1 de 5 s nem a janela PPG de 8 
 Este código foi revisado estaticamente, mas não foi compilado nem executado no
 Unity Editor/hardware neste ambiente. SpO2 continua DEMO não calibrada e não
 é apropriada para decisões médicas ou alertas de pacientes.
+
+
+## Experimento C — relogio do dispositivo, epoch G1 e renderizacao da HUD
+
+**Unity:** `test/unity-ppg-queue-throughput-probe`.
+**Firmware de teste (repositorio separado):** `PHV00/PITACO_ESP32`,
+branch `test/ppg-g1-contact-epoch`.
+
+### Contratos de comportamento
+
+1. **Expiracao temporal:** os 6500 ms sao avaliados pela diferenca
+   `sample.t_ms - g1.t_ms` no dominio do PITACO; `Time.unscaledTime`
+   nao pode sozinho invalidar o G1 apos um frame longo da Unity.
+2. **Perda real de amostras:** se a Unity deixar de receber frames por
+   mais de 3 s (e nao houver pacotes aguardando despacho), deve seguir
+   bloqueando, limpar a janela e registrar `TELEMETRY_LOST`.
+3. **Contato/SQI:** o firmware continua confirmando/removendo contato
+   apos 3 amostras; os thresholds G1 e a janela de 5 s NAO foram
+   flexibilizados. Confirmacao de mudanca de contato, inicio/fim de
+   coleta ou recuperacao de FIFO incrementa `sqi.epoch`.
+4. **Compatibilidade:** sem campo `sqi.epoch`, a Unity preserva
+   o tratamento conservador antigo para `sample.sqi.reason != 0`.
+   Para validar o novo caminho, o firmware PRECISA estar gravado.
+5. **Com epoch:** divergencia entre o epoch da amostra e do ultimo G1 PASS
+   acarreta `G1_EPOCH_CHANGED` e `G1_REVOKED` (reset verdadeiro).
+   Um `reason=1` com epoch IGUAL interrompe publicacao e registra
+   `G1_REASON_WAIT`/ `WINDOW_SUSPEND`, aguardando novo G1;
+   nunca publica usando a aprovacao antiga.
+6. **HUD:** `[PPG-HUD]` relata o **texto visual renderizado** e seu
+   estado `LIVE`, `WAIT_ESTIMATE`, `G1_BLOCK`,
+   `HOLD_VISUAL_ONLY` ou `NO_CONTACT`. `HOLD_VISUAL_ONLY`
+   so dura ate 2 s e ate 2 amostras `contact=false` consecutivas,
+   com rotulo de ultima leitura. Bridge/Mixer NAO utilizam hold.
+7. **G1 reprovado:** reason=4/5/9 e perda confirmada de contato
+   continuam bloqueando valores e exigindo recuperacao real.
+
+### Teste de bancada com Unity + firmware
+
+- Compilar e gravar o sketch do firmware **de teste** antes de abrir
+  Play Mode da Unity para medir o epoch; o firmware antigo funciona,
+  mas apenas exercita o fallback conservador.
+- Em bancada: 120 s com dedo fixo; repetir 120 s em gameplay e IA.
+- Procurar `[PITACO-QUEUE]` (entrada/saida, `maxFrameGapMs`,
+  `maxWaitMs`, `pending`), `[PPG-DIAG]` (`G1_TIMING`,
+  `G1_EXPIRED`, `G1_EPOCH_CHANGED`, `G1_REASON_WAIT`,
+  `G1_RECOVERY`, `G1_REJECT`, `WINDOW_RESET`,
+  `WINDOW_SUSPEND`) e `[PPG-HUD]`.
+- Uma pausa da Unity de 4-5 s, sem avancar o relogio do dispositivo
+  mais de 6,5 s desde o G1, nao deve causar `G1_EXPIRED`.
+- Testar uma oscilacao de 1-2 frames de contato: a HUD pode indicar
+  `HOLD_VISUAL_ONLY`, mas nao pode autorizar Mixer e nao deve
+  desencadear reset de sessao sem `epoch` alterado.
+- Retirar o dedo ate confirmar perda: o epoch muda, o G1 antigo fica
+  invalido e o sistema deve aguardar nova janela validada.
+- Se `[PPG-HUD] state=LIVE` persistir com texto correto mas o
+  usuario ainda observar HUD congelada, investigar objetos Canvas/Text
+  da cena, multiplos componentes ou sobreposicao de telas.
+
+**Nao validado em Unity/ESP32 nesta etapa**: conferir compilacao da
+versao local e observar resultado antes de promover qualquer branch.
+SpO2 DEMO continua nao calibrada e sem validade clinica.
