@@ -36,7 +36,10 @@ namespace Ibit.Core.Serial
         [SerializeField] private int handshakeTimeoutMs = 3000;
         [SerializeField] private int scanRetryMs = 5000;
         [SerializeField] private int maxPendingLines = 2048;
-        [SerializeField] private int maxLinesPerFrame = 256;
+        // Limit the cost of a post-stall burst on the Unity main thread.
+        // At ~45 serial lines/s, 64 per frame leaves generous normal margin.
+        // A backlog is drained over several frames instead of one spike.
+        [SerializeField] private int maxLinesPerFrame = 64;
         [SerializeField] private string preferredPort = "";
 
         private readonly object inboundLock = new object();
