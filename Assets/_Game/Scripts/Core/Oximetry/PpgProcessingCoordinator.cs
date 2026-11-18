@@ -139,9 +139,7 @@ namespace Ibit.Core.Oximetry
         // 5-second G1 cadence plus 1.5 s of delivery tolerance.
         // Experimental parameter; reevaluate with real hardware logs.
         private const uint Gate01MaxAgeMs = 6500;
-        // Kept for diagnostics only. Unity wall time is NOT the device's
-        // acquisition clock; a main-thread stall cannot expire a fresh G1.
-        private const float Gate01MaxAgeSeconds = 6.5f;
+        // No Unity-wall-clock timeout for G1: device age is authoritative.
         private const double MaximumTransportDelayMs = 2000.0;
         private double lastTransportDelayMs;
         private bool transportDelayed;
@@ -298,7 +296,16 @@ namespace Ibit.Core.Oximetry
                         ? PitacoConnectionManager.Active.PendingLines : 0) +
                     " | queueHighWater=" +
                     (PitacoConnectionManager.Active != null
-                        ? PitacoConnectionManager.Active.MaxPendingObserved : 0));
+                        ? PitacoConnectionManager.Active.MaxPendingObserved : 0) +
+                    " | serialLastDrainMs=" +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.LastDrainMs : 0.0).ToString("F2") +
+                    " | serialMaxDrainMs=" +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.MaxDrainMs : 0.0).ToString("F2") +
+                    " | serialLastDrainPackets=" +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.LastDrainedPackets : 0));
                 Trace("PERF", "queuePackets=" + transportPackets +
                     " | queueMeanMs=" +
                     (transportPackets == 0 ? 0.0 :
