@@ -772,7 +772,12 @@ namespace Ibit.Core.Oximetry
 
             PpgProcessedWindow processed;
             string reason;
-            if (!PpgSignalProcessor.TryProcess(buffer.Samples, out processed, out reason))
+            long windowStarted = Stopwatch.GetTimestamp();
+            bool windowReady = PpgSignalProcessor.TryProcess(
+                buffer.Samples, out processed, out reason);
+            // Measure both successful and rejected window evaluations.
+            windowCost.Add(windowStarted);
+            if (!windowReady)
             {
                 ClearHudContactHold();
                 LastMeasurement = new PpgMeasurement(sample.TimeMs, 0,
@@ -791,11 +796,17 @@ namespace Ibit.Core.Oximetry
             hasPreviousProcessingTime = true;
             double bpm, autocorrelation, spo2Demo, ratio, selectedLag;
             string bpmReason, spo2Reason;
+            long bpmStarted = Stopwatch.GetTimestamp();
             bool hasBpm = BpmEstimator.TryEstimateDetailed(processed, out bpm,
                 out autocorrelation, out selectedLag, out bpmReason);
+            bpmCost.Add(bpmStarted);
+            long spo2Started = Stopwatch.GetTimestamp();
             bool hasSpO2 = Spo2Estimator.TryEstimateDemoDetailed(processed,
                 out spo2Demo, out ratio, out spo2Reason);
-            TraceCalculation("BPM_" + bpmReason + "_SPO2_" + spo2Reason,
+            spo2Cost.Add(spo2Started);
+            string estimatorDecision = "BPM_" + bpmReason + "_SPO2_" + spo2Reason;
+            if (ShouldTraceCalculation(estimatorDecision))
+                TraceCalculation(estimatorDecision,
                 "stage=ESTIMATORS | seq=" + sample.Sequence +
                 " | devMs=" + sample.TimeMs +
                 " | buffer=" + buffer.Count +
@@ -811,8 +822,7 @@ namespace Ibit.Core.Oximetry
                 " | bpm=" + (hasBpm ? bpm.ToString("F1") : "--") +
                 " | spo2Reason=" + spo2Reason +
                 " | ratioR=" + ratio.ToString("F4") +
-                " | spo2Demo=" + (hasSpO2 ? spo2Demo.ToString("F1") : "--"),
-                true); // Audit every actual 400-ms estimator calculation.
+                " | spo2Demo=" + (hasSpO2 ? spo2Demo.ToString("F1") : "--"));
             LastMeasurement = new PpgMeasurement(sample.TimeMs, processed.SamplingHz,
                 hasBpm ? (double?)bpm : null,
                 hasSpO2 ? (double?)spo2Demo : null,
