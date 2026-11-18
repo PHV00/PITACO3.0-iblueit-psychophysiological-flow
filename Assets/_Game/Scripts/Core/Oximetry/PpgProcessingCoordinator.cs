@@ -292,7 +292,13 @@ namespace Ibit.Core.Oximetry
                     " | contact=" + OpticalContactConfirmed +
                     " | g1=" + gate01State +
                     " | queueDelayMs=" + lastTransportDelayMs.ToString("F1") +
-                    " | queueDelayed=" + transportDelayed);
+                    " | queueDelayed=" + transportDelayed +
+                    " | queuePending=" +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.PendingLines : 0) +
+                    " | queueHighWater=" +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.MaxPendingObserved : 0));
                 Trace("PERF", "queuePackets=" + transportPackets +
                     " | queueMeanMs=" +
                     (transportPackets == 0 ? 0.0 :
