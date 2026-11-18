@@ -62,6 +62,7 @@ namespace Ibit.Core.Game
         [SerializeField] private bool logSpo2AdaptationTest = true;
         private bool? lastSpo2EligibleForTest;
         private float nextNoTargetsDiagnosticAt;
+        private float nextSpawnerLookupAt;
 
         // Existing gameplay returns without advancing its sample clock when
         // no targets exist; throttle this diagnostic to avoid per-frame spam.
@@ -123,12 +124,17 @@ namespace Ibit.Core.Game
             SecurityPanelTwoExecuted = false;
             lastSpo2EligibleForTest = null;
             nextNoTargetsDiagnosticAt = 0f;
+            nextSpawnerLookupAt = 0f;
         }
 
         void AdaptationGrid(float signalPitaco, float signalMano,
             float signalCinta, OximetrySnapshot oximetry)
         {
-            if (_spawner == null){
+            // A newly loaded scene can briefly have no Spawner. Repeated
+            // whole-scene searches each frame add avoidable main-thread work.
+            if (_spawner == null && Time.unscaledTime >= nextSpawnerLookupAt)
+            {
+                nextSpawnerLookupAt = Time.unscaledTime + 1f;
                 _spawner = FindObjectOfType<Spawner>();
             }
 
@@ -139,7 +145,8 @@ namespace Ibit.Core.Game
             // Integration-test branch: the original saturation alerts, pauses
             // and rewards are also exercised with eligible PITACO 2.4 DEMO data.
             // DEMO is uncalibrated: do not use these alerts for patient safety.
-            bool eligible = oximetry.EligibleForLegacySpo2Rules &&
+            bool eligible = _spawner != null &&
+                oximetry.EligibleForLegacySpo2Rules &&
                 oximetry.SpO2Percent.HasValue;
             if (!lastSpo2EligibleForTest.HasValue ||
                 lastSpo2EligibleForTest.Value != eligible)

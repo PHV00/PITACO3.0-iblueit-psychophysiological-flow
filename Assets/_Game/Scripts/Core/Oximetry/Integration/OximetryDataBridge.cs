@@ -65,7 +65,33 @@ namespace Ibit.Core.Oximetry.Integration
         // Integration testing ONLY: reproduce legacy gameplay rules using the
         // uncalibrated PITACO 2.4 estimate. Set false to restore the original
         // calibration requirement; never use this to claim clinical validity.
-        public const bool EnableDemoSpo2LegacyRulesForTesting = true;
+        // Disabled by default. Explicit opt-in is restricted to controlled
+        // gameplay integration tests; never implies clinical calibration.
+        public static bool EnableDemoSpo2LegacyRulesForTesting { get; private set; }
+
+        public static void ConfigureDemoSpo2LegacyRulesForTesting(bool enabled)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            EnableDemoSpo2LegacyRulesForTesting = enabled;
+#else
+            // Never allow DEMO oxygenation to drive patient-facing gameplay
+            // adaptations in a normal release build.
+            EnableDemoSpo2LegacyRulesForTesting = false;
+#endif
+        }
+
+        // Unity publication time alone is insufficient when serial frames
+        // remained queued through a scene stall. Queue delay is a conservative
+        // lower bound; it never makes a measurement appear younger.
+        public static float EffectiveAgeSeconds(float unityPublicationAge,
+            int queueLagMs)
+        {
+            if (float.IsNaN(unityPublicationAge) ||
+                float.IsInfinity(unityPublicationAge) ||
+                unityPublicationAge < 0f)
+                return float.PositiveInfinity;
+            return unityPublicationAge + Math.Max(0, queueLagMs) / 1000f;
+        }
 
         private static bool HasValidAge(float age, float limit)
         {
@@ -138,10 +164,15 @@ namespace Ibit.Core.Oximetry.Integration
     {
         public static OximetryDataBridge Active { get; private set; }
 
+        [Header("Somente testes de integracao; NUNCA habilitar para pacientes")]
+        [SerializeField] private bool allowUncalibratedSpo2GameRulesForTesting = false;
+
         private PpgProcessingCoordinator ppg;
         private SerialControllerOximetro legacyController;
+        private float nextLegacyLookupAt;
         private PpgMeasurement lastPublished;
         private float lastPitacoPublicationAt = -1f;
+        private int lastPitacoPublicationQueueLagMs;
         private float lastLegacyPublicationAt = -1f;
         private double lastLegacyBpm;
         private double lastLegacySpo2;
@@ -171,6 +202,11 @@ namespace Ibit.Core.Oximetry.Integration
         {
             if (Active != null && Active != this) return;
             Active = this;
+            OximetrySnapshotFactory.ConfigureDemoSpo2LegacyRulesForTesting(
+                allowUncalibratedSpo2GameRulesForTesting);
+            if (allowUncalibratedSpo2GameRulesForTesting)
+                Debug.LogWarning("[PPG-TEST] SpO2 DEMO nao calibrado autorizado " +
+                    "para regras legadas SOMENTE neste ensaio de integracao.");
             AttachPpg();
         }
 
@@ -191,7 +227,9 @@ namespace Ibit.Core.Oximetry.Integration
                 object.ReferenceEquals(current, lastPublished);
             bool bpmHudHold = ppg != null && ppg.HudHoldingRejectedBpm;
             float publicationAge = lastPitacoPublicationAt >= 0f
-                ? Time.unscaledTime - lastPitacoPublicationAt
+                ? OximetrySnapshotFactory.EffectiveAgeSeconds(
+                    Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt),
+                    lastPitacoPublicationQueueLagMs)
                 : float.PositiveInfinity;
 
             string cause;
@@ -234,6 +272,7 @@ namespace Ibit.Core.Oximetry.Integration
                 " | rawG1=" + (ppg != null && ppg.Gate01Approved) +
                 " | samePublication=" + samePublication +
                 " | ageS=" + publicationAge.ToString("F2") +
+                " | publishQueueLagMs=" + lastPitacoPublicationQueueLagMs +
                 " | bpm=" + FormatReading(state.Bpm) +
                 " | spo2Demo=" + FormatReading(state.SpO2Percent) +
                 " | eligible=" + state.EligibleForLegacySpo2Rules +
@@ -285,6 +324,10 @@ namespace Ibit.Core.Oximetry.Integration
         {
             lastPublished = measurement;
             lastPitacoPublicationAt = Time.unscaledTime;
+            var manager = PitacoConnectionManager.Active;
+            // An old line does NOT become fresh when Unity finally dispatches it.
+            lastPitacoPublicationQueueLagMs = manager != null
+                ? Math.Max(0, manager.CurrentDispatchQueueLagMs) : 0;
         }
 
         // Called after the legacy Player accepts its next comma-delimited pair.
@@ -309,7 +352,9 @@ namespace Ibit.Core.Oximetry.Integration
                 float age = measurement != null &&
                     object.ReferenceEquals(measurement, lastPublished) &&
                     lastPitacoPublicationAt >= 0f
-                    ? Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt)
+                    ? OximetrySnapshotFactory.EffectiveAgeSeconds(
+                        Mathf.Max(0f, Time.unscaledTime - lastPitacoPublicationAt),
+                        lastPitacoPublicationQueueLagMs)
                     : float.PositiveInfinity;
                 return OximetrySnapshotFactory.FromPitaco24(
                     true, ppg != null && ppg.OpticalContactConfirmed,
@@ -335,8 +380,13 @@ namespace Ibit.Core.Oximetry.Integration
 
         private OximetrySnapshot GetLegacySnapshot()
         {
-            if (legacyController == null)
+            // No legacy oximeter is a normal PITACO-only configuration.
+            // Do not execute a whole-scene search on every Mixer Update.
+            if (legacyController == null && Time.unscaledTime >= nextLegacyLookupAt)
+            {
+                nextLegacyLookupAt = Time.unscaledTime + 1f;
                 legacyController = FindObjectOfType<SerialControllerOximetro>();
+            }
             bool connected = legacyController != null && legacyController.IsConnected;
             float legacyAge = lastLegacyPublicationAt >= 0f
                 ? Mathf.Max(0f, Time.unscaledTime - lastLegacyPublicationAt)
@@ -351,9 +401,14 @@ namespace Ibit.Core.Oximetry.Integration
                 ppg.OnMeasurement -= OnPpgMeasurement;
             lastPublished = null;
             lastPitacoPublicationAt = -1f;
+            lastPitacoPublicationQueueLagMs = 0;
             lastMixerConsumptionAt = -1f;
             mixerConsumptionCount = 0;
-            if (Active == this) Active = null;
+            if (Active == this)
+            {
+                OximetrySnapshotFactory.ConfigureDemoSpo2LegacyRulesForTesting(false);
+                Active = null;
+            }
         }
     }
 }
