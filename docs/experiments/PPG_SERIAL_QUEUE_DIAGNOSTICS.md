@@ -94,62 +94,84 @@ Unity Editor/hardware neste ambiente. SpO2 continua DEMO não calibrada e não
 é apropriada para decisões médicas ou alertas de pacientes.
 
 
-## Experimento C — relogio do dispositivo, epoch G1 e renderizacao da HUD
+ 
+## Experimento C — Unity-only, firmware PITACO validado e congelado
 
-**Unity:** `test/unity-ppg-queue-throughput-probe`.
-**Firmware de teste (repositorio separado):** `PHV00/PITACO_ESP32`,
-branch `test/ppg-g1-contact-epoch`.
+**Escopo:** somente o repositorio Unity
+`PHV00/iblueit-psychophysiological-flow-pitaco2.4-port`,
+branch `test/unity-ppg-queue-throughput-probe`. O firmware original
+e a avaliacao G1 ja foram validados via BLE e **nao devem ser alterados
+nem regravados** neste experimento.
 
-### Contratos de comportamento
+### Contrato ja existente do firmware
 
-1. **Expiracao temporal:** os 6500 ms sao avaliados pela diferenca
-   `sample.t_ms - g1.t_ms` no dominio do PITACO; `Time.unscaledTime`
-   nao pode sozinho invalidar o G1 apos um frame longo da Unity.
-2. **Perda real de amostras:** se a Unity deixar de receber frames por
-   mais de 3 s (e nao houver pacotes aguardando despacho), deve seguir
-   bloqueando, limpar a janela e registrar `TELEMETRY_LOST`.
-3. **Contato/SQI:** o firmware continua confirmando/removendo contato
-   apos 3 amostras; os thresholds G1 e a janela de 5 s NAO foram
-   flexibilizados. Confirmacao de mudanca de contato, inicio/fim de
-   coleta ou recuperacao de FIFO incrementa `sqi.epoch`.
-4. **Compatibilidade:** sem campo `sqi.epoch`, a Unity preserva
-   o tratamento conservador antigo para `sample.sqi.reason != 0`.
-   Para validar o novo caminho, o firmware PRECISA estar gravado.
-5. **Com epoch:** divergencia entre o epoch da amostra e do ultimo G1 PASS
-   acarreta `G1_EPOCH_CHANGED` e `G1_REVOKED` (reset verdadeiro).
-   Um `reason=1` com epoch IGUAL interrompe publicacao e registra
-   `G1_REASON_WAIT`/ `WINDOW_SUSPEND`, aguardando novo G1;
-   nunca publica usando a aprovacao antiga.
-6. **HUD:** `[PPG-HUD]` relata o **texto visual renderizado** e seu
-   estado `LIVE`, `WAIT_ESTIMATE`, `G1_BLOCK`,
-   `HOLD_VISUAL_ONLY` ou `NO_CONTACT`. `HOLD_VISUAL_ONLY`
-   so dura ate 2 s e ate 2 amostras `contact=false` consecutivas,
-   com rotulo de ultima leitura. Bridge/Mixer NAO utilizam hold.
-7. **G1 reprovado:** reason=4/5/9 e perda confirmada de contato
-   continuam bloqueando valores e exigindo recuperacao real.
+A Unity consome os campos existentes nos JSON originais:
+`type=sample`, `seq`, `t_ms`, `ppg.red`, `ppg.ir`,
+`sqi.contact`, `sqi.reason`; e `type=g1`, `t_ms`,
+`window`, `sqi.g1`, `sqi.reason`, `sqi.samples`.
+**Nao ha campo epoch, extensao de firmware ou dependencia de PR externo.**
 
-### Teste de bancada com Unity + firmware
+### Correcoes exclusivamente Unity
 
-- Compilar e gravar o sketch do firmware **de teste** antes de abrir
-  Play Mode da Unity para medir o epoch; o firmware antigo funciona,
-  mas apenas exercita o fallback conservador.
-- Em bancada: 120 s com dedo fixo; repetir 120 s em gameplay e IA.
-- Procurar `[PITACO-QUEUE]` (entrada/saida, `maxFrameGapMs`,
-  `maxWaitMs`, `pending`), `[PPG-DIAG]` (`G1_TIMING`,
-  `G1_EXPIRED`, `G1_EPOCH_CHANGED`, `G1_REASON_WAIT`,
-  `G1_RECOVERY`, `G1_REJECT`, `WINDOW_RESET`,
-  `WINDOW_SUSPEND`) e `[PPG-HUD]`.
-- Uma pausa da Unity de 4-5 s, sem avancar o relogio do dispositivo
-  mais de 6,5 s desde o G1, nao deve causar `G1_EXPIRED`.
-- Testar uma oscilacao de 1-2 frames de contato: a HUD pode indicar
-  `HOLD_VISUAL_ONLY`, mas nao pode autorizar Mixer e nao deve
-  desencadear reset de sessao sem `epoch` alterado.
-- Retirar o dedo ate confirmar perda: o epoch muda, o G1 antigo fica
-  invalido e o sistema deve aguardar nova janela validada.
-- Se `[PPG-HUD] state=LIVE` persistir com texto correto mas o
-  usuario ainda observar HUD congelada, investigar objetos Canvas/Text
-  da cena, multiplos componentes ou sobreposicao de telas.
+1. `Gate01Approved` e `IsGate01ApprovedForSample` verificam o
+   prazo de 6500 ms pelo dominio **`sample.t_ms - g1.t_ms`**.
+   O salto de `Time.unscaledTime` em frame travado nao e motivo
+   suficiente para declarar G1 expirado.
+2. Se nao chegarem samples por 3 s e a fila estiver vazia, a
+   telemetria continua sendo invalidada (watchdog real).
+   `UNITY_FRAME_STALL` concede **0,5 s de tolerancia apenas ao reset
+   da janela**, na primeira verificacao apos um frame com atraso >3 s.
+   Essa tolerancia NAO autoriza medicao antiga no Bridge/Mixer.
+3. A fila USB/Unity passa a despachar no maximo **64 linhas por frame**
+   por padrao, para repartir rajadas da retomada da thread principal;
+   nao altera ordem, perda de pacotes, portas USB nem taxa da placa.
+   `budgetExhaustionsTotal` pode aumentar apos um travamento curto:
+   observar `pending` e `dropped` juntos antes de interpretar.
+4. A telemetria detalhada `CALC stage=ESTIMATORS` deixa de imprimir
+   a cada 400 ms e passa a registrar mudancas de status e batimento
+   a cada 2 s, diminuindo o custo do Console e stacktrace.
+5. `OximetryHudPresenter` usa **diretamente a medicao atual do
+   PpgProcessingCoordinator** para PITACO 2.4, sem cache de 1 s
+   do `Player`. Legado continua usando `ReadPlayerText(false)`.
+   `[PPG-HUD]` traz `scene`, `object`, `frame`, `state`,
+   valores candidatos e a string realmente atribuida ao `Text`.
+6. `HOLD_VISUAL_ONLY` continua limitado a ate 2 s e
+   1-2 amostras de contato falso consecutivas; nunca entra no Mixer.
+   Sem leitura autorizada, a HUD sinaliza `G1_BLOCK`,
+   `WAIT_ESTIMATE` ou `NO_CONTACT`, em vez de mostrar zeros
+   ou reaproveitar uma SpO2 como se fosse atual.
+7. Se o firmware indicar `sample.sqi.reason=1` enquanto um G1
+   anterior estava aprovado, a Unity continua **reiniciando a janela**
+   de modo conservador: o firmware pode ter iniciado nova
+   sessao de aquisicao. Reprovacoes reason 4/5/9 e perda de
+   contato confirmada continuam bloqueando a publicacao.
 
-**Nao validado em Unity/ESP32 nesta etapa**: conferir compilacao da
-versao local e observar resultado antes de promover qualquer branch.
-SpO2 DEMO continua nao calibrada e sem validade clinica.
+### Como validar sem tocar no firmware
+
+```bash
+git fetch origin
+git switch test/unity-ppg-queue-throughput-probe
+git pull --ff-only origin test/unity-ppg-queue-throughput-probe
+```
+
+1. Iniciar Play Mode e confirmar `[PITACO-QUEUE]`,
+   `[PPG-DIAG]` e `[PPG-HUD]`.
+2. Coletar 120 s com dedo estavel + 120 s durante jogo/IA. Preservar
+   o Console inteiro, com `t`, `seq` e `devMs`.
+3. Se Unity ficar ~4,75 s parada, registrar `UNITY_FRAME_STALL`
+   e `maxFrameGapMs`; nao deve ocorrer `G1_EXPIRED`
+   apenas por esse salto de Unity.
+4. Conferir `G1_TIMING` (intervalos em dispositivo e Unity),
+   `WINDOW_SUSPEND`, `G1_RECOVERY`, `G1_REVOKED`,
+   `WINDOW_RESET`, `BRIDGE_TRANSITION` e `[PPG-HUD]`.
+5. Para `G1_REVOKED`/reprovacoes verdadeiras, valores deixam
+   de ser publicados; o texto de HUD deve indicar a causa, sem
+   manter numero antigo aparentemente valido.
+6. Se `[PPG-HUD] state=LIVE` mostrar numeros corretos, mas o
+   widget visivel continuar congelado, verificar o Canvas/objeto
+   e componentes de cena; a linha comprova atribuicao ao
+   componente Text, nao a renderizacao final na tela.
+
+**Limite da validacao atual:** revisao estatica do codigo, sem build
+do Unity Editor nem teste de hardware neste ambiente. A SpO2 DEMO
+permanece nao calibrada e nao e apropriada para decisoes clinicas.
