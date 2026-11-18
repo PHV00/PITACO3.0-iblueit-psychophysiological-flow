@@ -25,6 +25,7 @@ namespace Ibit.Core.Serial
             public PacketKind Kind;
             public Version DeviceVersion;
             public string Text;
+            public int EnqueuedTick;
         }
 
         public static PitacoConnectionManager Active { get; private set; }
@@ -49,9 +50,16 @@ namespace Ibit.Core.Serial
         private Version activeVersion;
         private int pendingLines;
         private long droppedLines;
+        private int peakPendingLines;
+        private long queueBudgetExhaustions;
+        private int peakQueueLagMs;
 
         public Version ConnectedVersion => activeVersion;
         public long DroppedLines => Interlocked.Read(ref droppedLines);
+        public int PendingLines { get { lock (inboundLock) return pendingLines; } }
+        public int PeakPendingLines => Volatile.Read(ref peakPendingLines);
+        public long QueueBudgetExhaustions => Interlocked.Read(ref queueBudgetExhaustions);
+        public int PeakQueueLagMs => Volatile.Read(ref peakQueueLagMs);
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -146,6 +154,7 @@ namespace Ibit.Core.Serial
             if (Time.frameCount % 60 == 0)
                 BindControllers();
             int count = Math.Max(1, maxLinesPerFrame);
+            int processedThisFrame = 0;
             for (int i = 0; i < count; ++i)
             {
                 Packet packet;
@@ -153,7 +162,14 @@ namespace Ibit.Core.Serial
                 {
                     if (inbound.Count == 0) break;
                     packet = inbound.Dequeue();
+                    processedThisFrame++;
                     if (packet.Kind == PacketKind.Line) pendingLines--;
+                }
+                if (packet.Kind == PacketKind.Line)
+                {
+                    int lagMs = unchecked(Environment.TickCount - packet.EnqueuedTick);
+                    if (lagMs >= 0 && lagMs > peakQueueLagMs)
+                        Interlocked.Exchange(ref peakQueueLagMs, lagMs);
                 }
 
                 switch (packet.Kind)
@@ -184,6 +200,8 @@ namespace Ibit.Core.Serial
                         break;
                 }
             }
+            if (processedThisFrame == count && PendingLines > 0)
+                Interlocked.Increment(ref queueBudgetExhaustions);
         }
 
         private static bool IsNumericPressure(string line)
@@ -207,8 +225,11 @@ namespace Ibit.Core.Serial
                         return;
                     }
                     pendingLines++;
+                    if (pendingLines > peakPendingLines)
+                        peakPendingLines = pendingLines;
                 }
-                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text });
+                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text,
+                    EnqueuedTick = Environment.TickCount });
             }
         }
 
