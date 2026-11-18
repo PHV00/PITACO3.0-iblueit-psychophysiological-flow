@@ -122,3 +122,64 @@ NAO considerar visualizacao estabilizada equivalente a estimacao validada.
 - *A Survey of Photoplethysmography and Imaging Photoplethysmography
   Quality Assessment Methods*, Applied Sciences 2022:
   https://www.mdpi.com/2076-3417/12/19/9582
+
+## 5. Diagnostico do primeiro BPM (novo log de bancada, 18/11/2026)
+
+**Nao confundir tempo sem contato com latencia do estimador.** Observacoes
+do log enviado pelo testador (tempos `t` da Unity):
+
+- 12,91 a 39,71 s: G1 `reason=2` = RED_LOW (`redMean` ~1.958 a
+  3.033, abaixo de 5.000); a maioria das amostras estava `contact=false`.
+- 42,73 s: `CONTACT_PRESENT`, primeira aquisicao valida de contato.
+- 47,73 s: `G1_PASS` pela primeira vez.
+- 50,45 a 50,52 s: duas amostras publicadas com contato falso, depois
+  `G1_REVOKED reason=1`, reinicio de janela e descarte de 162 amostras.
+  Motivo 1 no JSON de amostra significa acumulador G1 reiniciado pelo
+  firmware; nao reusar o PASS antigo.
+- 55,52 s: `G1_REJECT reason=5` = IR_FLAT (variacao IR 409, minimo 500).
+- 60,53 s: proximo `G1_PASS`.
+- 63,53 s: primeira janela PPG de 8 segundos completa;
+  `autocorr=0,429`, reprovado.
+- 66 a 72 s: `autocorr=0,062`, `0,058`, `0,057`, `0,310`,
+  `0,462`: nao confundir candidatos de BPM com leitura valida.
+- 74,55 s: primeiro BPM 54,1 (autocorr 0,568), 31,82 segundos depois
+  do contato inicial; esse e um dos resultados admitidos apenas por 0,55.
+- 76 a 87 s: autocorrelacoes 0,81 a 0,95 e BPM ~53 a 54, boa
+  estabilizacao apos a fase inicial.
+- 89,68 s: perda confirmada de contato; 91,09 s: contato restabelecido;
+  96,08 s: G1 PASS; 99,10 s: primeira janela rejeitada; **99,48 s:
+  BPM valido 52,0**, 8,39 segundos apos o novo contato.
+- Na mesma serie, `SUMMARY` aos 99,71 s: `bpmTrials=67`,
+  `bpm057Pass=38`, `bpm055Pass=39`, `bpmPublished=39`.
+  Reducao de limiar liberou apenas **1 decisao de 67**, nao e a
+  principal explicacao para os 31,82 s de latencia inicial.
+- `bpmVisualHoldDecisions=0`: este ensaio NAO exercitou a histerese
+  apos uma medicao valida; o hold de contato separado aparece como
+  `HOLD_VISUAL_ONLY`. Testar os dois mecanismos distintamente.
+- Fila serie sem perdas (`dropped=0`), mas houve `UNITY_FRAME_STALL`
+  de 5,07 s e pico de 226 mensagens pendentes durante carregamento
+  ML-Agents, portanto medir separadamente travadas de cena.
+
+**Nova instrumentacao Unity** (nenhuma mudanca de criterio):
+
+- `STARTUP_CONTACT`: instante de contato pela primeira vez.
+- `STARTUP_FIRST_G1_PASS`: tempo desde contato ate primeiro PASS.
+- `STARTUP_FIRST_FULL_WINDOW`: tempo desde contato ate a primeira
+  janela completa e quantidade de resets/rejeicoes desde contato.
+- `STARTUP_FIRST_BPM`: tempo desde contato ate primeira medida
+  validada, com autocorrelacao e contagem de rejeicoes G1 anteriores.
+- HUD agora mostra `coletando janela PPG (x/8,0 s)` ou
+  `janela completa; aguardando sinal periodico confiavel`, alem
+  de classificar `reason=2` (RED baixo) e `reason=5` (IR plano).
+- Os diagnosticos contam uma sessao iniciada em `CONTACT_PRESENT`;
+  `G1_REVOKED` nao redefine o marco inicial: assim o custo real dos
+  reinicios permanece observavel.
+
+**Proxima acao**: teste por 2 min com dedo firme desde o inicio,
+gravando todos os `STARTUP_*`; preferencialmente sem carregamento de
+cena no meio do teste. Se a primeira janela tem qualidade baixa,
+examinar acoplamento optico/pressao/forma de onda; NAO encurtar
+automaticamente o limiar 0,55, G1 (5 s) ou o buffer PPG (8 s).
+
+**Limite**: instrumentacao e feedback visual nao aceleram o estimador
+real nem certificam a qualidade fisiologica de resultados.
