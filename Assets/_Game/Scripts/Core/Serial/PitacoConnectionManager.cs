@@ -2,7 +2,7 @@
 // Os controladores existentes continuam responsaveis por eventos/protocolos.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
