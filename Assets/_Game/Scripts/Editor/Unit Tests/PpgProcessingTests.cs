@@ -622,6 +622,108 @@ public class PpgProcessingTests
         finally { UnityEngine.Object.DestroyImmediate(gameObject); }
     }
 
+    // Step 1.1: keep ESP32 millis() and host Stopwatch in separate clock
+    // domains. An Editor pause must not expire a G1 while device-time is fresh.
+    [Test]
+    public void UnityMainThreadDelayDoesNotExpireDeviceFreshG1()
+    {
+        var go = new GameObject("PPG G1 host stall invariant");
+        try
+        {
+            var coordinator = go.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 150; ++i)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(6000, true, 0));
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+
+            var arrivalField = typeof(PpgProcessingCoordinator).GetField(
+                "lastGate01ArrivalAt", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(arrivalField);
+            arrivalField.SetValue(coordinator, Time.unscaledTime - 20f);
+            var update = typeof(PpgProcessingCoordinator).GetMethod(
+                "Update", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(update);
+            update.Invoke(coordinator, null);
+
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+            Assert.IsTrue(coordinator.Gate01Approved,
+                "A device-fresh G1 must not fail from Unity frame-time alone.");
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(151, true));
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(go); }
+    }
+
+    [Test]
+    public void QueuedOldPacketsCannotPublishDespiteApprovedG1()
+    {
+        var go = new GameObject("PPG backlog is not fresh acquisition");
+        try
+        {
+            var coordinator = go.AddComponent<PpgProcessingCoordinator>();
+            long old = System.Diagnostics.Stopwatch.GetTimestamp() -
+                4L * System.Diagnostics.Stopwatch.Frequency;
+            for (int i = 0; i < 210; ++i)
+            {
+                ReceiveTimedG1TestJson(coordinator,
+                    MakeGate01TestSample(i, true), old);
+                if (i == 125)
+                    ReceiveTimedG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0), old);
+            }
+            Assert.IsFalse(coordinator.Gate01Approved,
+                "A stale host queue must not authorize publication.");
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+
+            // The first genuinely fresh sample can use the preserved raw
+            // window: all its optical data are continuous and within 8s.
+            ReceiveTimedG1TestJson(coordinator, MakeGate01TestSample(210, true),
+                System.Diagnostics.Stopwatch.GetTimestamp());
+            Assert.IsTrue(coordinator.Gate01Approved);
+            Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue,
+                "A recovered, complete window should become processable.");
+        }
+        finally { UnityEngine.Object.DestroyImmediate(go); }
+    }
+
+    [Test]
+    public void QueueDelayDoesNotModifyFirmwareDeviceTimestampOrSequence()
+    {
+        var go = new GameObject("PPG dual clock contract");
+        try
+        {
+            var coordinator = go.AddComponent<PpgProcessingCoordinator>();
+            long old = System.Diagnostics.Stopwatch.GetTimestamp() -
+                3L * System.Diagnostics.Stopwatch.Frequency;
+            ReceiveTimedG1TestJson(coordinator, MakeGate01TestSample(0, true), old);
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "lastTransportDelayMs", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(field);
+            Assert.Greater((double)field.GetValue(coordinator), 2000.0);
+            var bufferField = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(bufferField);
+            var buffer = (PpgSampleBuffer)bufferField.GetValue(coordinator);
+            Assert.AreEqual((uint)0, buffer.Samples[0].TimeMs);
+            Assert.AreEqual((ushort)0, buffer.Samples[0].Sequence);
+            ReceiveTimedG1TestJson(coordinator, MakeGate01TestSample(1, true),
+                System.Diagnostics.Stopwatch.GetTimestamp());
+            Assert.AreEqual((uint)40, buffer.Samples[1].TimeMs);
+            Assert.AreEqual((ushort)1, buffer.Samples[1].Sequence);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(go); }
+    }
+
+    private static void ReceiveTimedG1TestJson(
+        PpgProcessingCoordinator coordinator, string json, long workerTicks)
+    {
+        var method = typeof(PpgProcessingCoordinator).GetMethod(
+            "ReceiveTimedJson", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(method);
+        method.Invoke(coordinator, new object[] { json, workerTicks });
+    }
+
     [Test]
     public void ContactFalseOpticalFramesRefreshTelemetryHeartbeat()
     {
