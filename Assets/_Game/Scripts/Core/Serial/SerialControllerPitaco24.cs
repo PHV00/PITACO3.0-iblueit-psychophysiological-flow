@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
@@ -59,6 +60,10 @@ namespace Ibit.Core.Serial
         public event Action OnSerialDisconnected;
         public event Action<string> OnSerialMessageReceived;
         public event Action<string> OnJsonReceived;
+        // Additional timing-aware callback. Existing callers remain supported.
+        // The timestamp marks when the complete line entered the host queue,
+        // NOT when the ESP32 ADC converted a sample.
+        public event Action<string, long> OnJsonReceivedTimed;
 
         private void Awake()
         {
@@ -212,6 +217,11 @@ namespace Ibit.Core.Serial
 
         internal void ManagedLine(string message)
         {
+            ManagedLine(message, Stopwatch.GetTimestamp());
+        }
+
+        internal void ManagedLine(string message, long receivedTicks)
+        {
             if (!IsConnected || string.IsNullOrEmpty(message)) return;
             OnSerialMessageReceived?.Invoke(message);
             string line = message.Trim();
@@ -219,6 +229,7 @@ namespace Ibit.Core.Serial
                 !line.EndsWith("}", StringComparison.Ordinal))
                 return;
             JsonMessagesReceived++;
+            OnJsonReceivedTimed?.Invoke(line, receivedTicks);
             OnJsonReceived?.Invoke(line);
             if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 && JsonMessagesReceived % logEveryNJsonMessages == 0)
                 Debug.Log("[PITACO 2.4] JSON: " + JsonMessagesReceived +
@@ -274,6 +285,10 @@ namespace Ibit.Core.Serial
                         line.EndsWith("}", StringComparison.Ordinal))
                     {
                         JsonMessagesReceived++;
+                        // The legacy standalone reader exposes only dequeue
+                        // time, not worker ingress. It is explicitly marked
+                        // as a dispatch-time proxy in diagnostics.
+                        OnJsonReceivedTimed?.Invoke(line, Stopwatch.GetTimestamp());
                         OnJsonReceived?.Invoke(line);
 
                         if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 &&
