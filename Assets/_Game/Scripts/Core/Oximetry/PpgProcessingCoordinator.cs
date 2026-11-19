@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Ibit.Core.Serial;
 using UnityEngine;
 
@@ -189,6 +190,17 @@ namespace Ibit.Core.Oximetry
         private long toleratedShortContactGaps;
         private long confirmedContactLosses;
 
+        // Trace only: six preceding RAW observations + short invalid/recovery
+        // bursts. Independent of G1, the processing buffer and publication.
+        // Reference constants mirror the currently frozen PITACO firmware.
+        private const int OpticalTraceHistoryCount = 6;
+        private const int OpticalTraceRecoveryCount = 4;
+        private const int OpticalTraceContactMin = 5000;
+        private const int OpticalTraceClipStart = 262143 - 2048;
+        private readonly Queue<string> opticalRawHistory = new Queue<string>();
+        private int opticalInvalidRun;
+        private int opticalRecoveryRemaining;
+
         private Gate01State gate01State = Gate01State.Waiting;
         private bool gate01Received;
         private uint lastGate01TimeMs;
@@ -298,6 +310,7 @@ namespace Ibit.Core.Oximetry
         private void OnEnable()
         {
             deviceClock.Clear();
+            ClearOpticalTrace();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("Aguardando amostras RED/IR");
@@ -414,6 +427,7 @@ namespace Ibit.Core.Oximetry
         private void OnDisable()
         {
             deviceClock.Clear();
+            ClearOpticalTrace();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             if (serialController != null)
@@ -427,6 +441,7 @@ namespace Ibit.Core.Oximetry
         private void OnDeviceDisconnected()
         {
             deviceClock.Clear();
+            ClearOpticalTrace();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("PITACO 2.4 desconectado");
@@ -436,6 +451,71 @@ namespace Ibit.Core.Oximetry
         {
             Debug.Log("[PPG-DIAG] t=" + Time.unscaledTime.ToString("F2") +
                 " | event=" + eventName + " | " + detail);
+        }
+
+        private void ClearOpticalTrace()
+        {
+            opticalRawHistory.Clear();
+            opticalInvalidRun = 0;
+            opticalRecoveryRemaining = 0;
+        }
+
+        // The firmware's contact flag can be false even when both channels
+        // currently exceed 5000: it needs three good samples to re-confirm.
+        // These observations explain WHY a flag changed without weakening it.
+        private void TraceOpticalRaw(SampleFrame frame)
+        {
+            bool contact = frame.sqi.contact;
+            int red = frame.ppg.red;
+            int ir = frame.ppg.ir;
+            string rawStatus = "redBelow5000=" + (red < OpticalTraceContactMin) +
+                " | irBelow5000=" + (ir < OpticalTraceContactMin) +
+                " | redNearClip=" + (red >= OpticalTraceClipStart) +
+                " | irNearClip=" + (ir >= OpticalTraceClipStart);
+            string detail = "seq=" + frame.seq + " | devMs=" + frame.t_ms +
+                " | red=" + red + " | ir=" + ir +
+                " | fwContact=" + contact + " | fwReason=" + frame.sqi.reason +
+                " | " + rawStatus +
+                " | unityConfirmedContact=" + OpticalContactConfirmed +
+                " | g1=" + gate01State +
+                " | serialQueueLagMs=" +
+                (PitacoConnectionManager.Active != null
+                    ? PitacoConnectionManager.Active.CurrentDispatchQueueLagMs : 0);
+            if (!contact)
+            {
+                if (opticalInvalidRun == 0)
+                {
+                    Trace("OPTICAL_EDGE", "transition=TO_INVALID | " + detail +
+                        " | precedingRaw=[ " +
+                        string.Join("; ", opticalRawHistory.ToArray()) + " ]");
+                }
+                ++opticalInvalidRun;
+                opticalRecoveryRemaining = 0;
+                // First three failures show the confirmation sequence; sustained
+                // finger-off is sampled every ~5 s, not logged at 25 Hz.
+                if (opticalInvalidRun <= 3 || opticalInvalidRun % 125 == 0)
+                    Trace("OPTICAL_SAMPLE", "phase=INVALID | badRun=" +
+                        opticalInvalidRun + " | " + detail);
+            }
+            else if (opticalInvalidRun > 0)
+            {
+                Trace("OPTICAL_EDGE", "transition=TO_VALID | previousBadRun=" +
+                    opticalInvalidRun + " | " + detail);
+                opticalInvalidRun = 0;
+                opticalRecoveryRemaining = OpticalTraceRecoveryCount;
+            }
+            else if (opticalRecoveryRemaining > 0)
+            {
+                Trace("OPTICAL_SAMPLE", "phase=RECOVERY | remaining=" +
+                    opticalRecoveryRemaining + " | " + detail);
+                --opticalRecoveryRemaining;
+            }
+
+            opticalRawHistory.Enqueue("seq=" + frame.seq +
+                ",devMs=" + frame.t_ms + ",red=" + red + ",ir=" + ir +
+                ",contact=" + contact + ",reason=" + frame.sqi.reason);
+            if (opticalRawHistory.Count > OpticalTraceHistoryCount)
+                opticalRawHistory.Dequeue();
         }
 
         // Every new outcome is logged immediately; repeated identical outcomes
@@ -728,6 +808,10 @@ namespace Ibit.Core.Oximetry
                 return;
             }
 
+            // Bounded optical diagnostics capture failures even when Unity
+            // subsequently quarantines the sample or resets the 8s buffer.
+            TraceOpticalRaw(frame);
+
             // The worker stamps the complete USB line BEFORE Unity's queue.
             // Align against firmware t_ms/seq without moving any G1 logic.
             var serialManager = PitacoConnectionManager.Active;
@@ -751,6 +835,7 @@ namespace Ibit.Core.Oximetry
                     // from the old epoch after a suspected device restart.
                     rawG1Probe.Clear();
                     LastG1ShadowSummary = null;
+                    ClearOpticalTrace();
                     ResetMeasurements("PITACO: relogio/sequencia reiniciados");
                     lastSampleReceivedAt = Time.unscaledTime;
                     lastObservedDeviceMs = (uint)frame.t_ms;

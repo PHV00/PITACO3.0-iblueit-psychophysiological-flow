@@ -19,7 +19,7 @@ namespace Ibit.Core.Serial
     public sealed class PitacoConnectionManager : MonoBehaviour
     {
         public enum Version { None, Pitaco20, Pitaco24 }
-        private enum PacketKind { Connected, Disconnected, Line, Warning }
+        private enum PacketKind { Connected, Disconnected, Line, Warning, CommandTrace }
 
         private sealed class Packet
         {
@@ -175,6 +175,9 @@ namespace Ibit.Core.Serial
         {
             if (string.IsNullOrEmpty(command)) return;
             lock (outboundLock) outbound.Enqueue(command);
+            // This means requested, NOT necessarily written to the device.
+            Debug.Log("[PITACO-CMD] phase=QUEUED | command=" + command +
+                " | version=" + activeVersion);
         }
 
         private void Update()
@@ -253,6 +256,13 @@ namespace Ibit.Core.Serial
                         break;
                     case PacketKind.Warning:
                         Debug.LogWarning("[PITACO Manager] " + packet.Text);
+                        break;
+                    case PacketKind.CommandTrace:
+                        // The USB worker reports this only AFTER port.Write.
+                        Debug.Log("[PITACO-CMD] " + packet.Text +
+                            " | workerTickMs=" + packet.EnqueuedTick +
+                            " | dispatchDelayMs=" +
+                            Math.Max(0, unchecked(Environment.TickCount - packet.EnqueuedTick)));
                         break;
                 }
             }
@@ -342,6 +352,8 @@ namespace Ibit.Core.Serial
                 }
                 // Firmware interpreta caracteres individuais; nunca acrescentar LF.
                 port.Write(command);
+                Push(PacketKind.CommandTrace, Version.Pitaco24,
+                    "phase=SENT | command=" + command + " | port=" + port.PortName);
             }
         }
 
@@ -375,6 +387,9 @@ namespace Ibit.Core.Serial
             port.DiscardInBuffer();
             bool is24 = version == Version.Pitaco24;
             port.Write(is24 ? "i" : "e");
+            Push(PacketKind.CommandTrace, version,
+                "phase=IDENTIFY_SENT | command=" + (is24 ? "i" : "e") +
+                " | port=" + port.PortName);
             return WaitFor(port, is24 ? "echo2.4p" : "echop", handshakeTimeoutMs);
         }
 
@@ -453,7 +468,13 @@ namespace Ibit.Core.Serial
                             finally
                             {
                                 // Encerra a amostragem somente ao finalizar a sessao fisica.
-                                try { port.Write("f"); } catch (Exception) { }
+                                try
+                                {
+                                    port.Write("f");
+                                    Push(PacketKind.CommandTrace, found,
+                                        "phase=SHUTDOWN_SENT | command=f | port=" + portName);
+                                }
+                                catch (Exception) { }
                             }
                         }
                     }
