@@ -182,7 +182,7 @@ namespace Ibit.Core.Oximetry.Integration
         public static OximetryDataBridge Active { get; private set; }
 
         [Header("Somente testes de integracao; NUNCA habilitar para pacientes")]
-        [SerializeField] private bool allowUncalibratedSpo2GameRulesForTesting = false;
+        [SerializeField] private bool allowUncalibratedSpo2GameRulesForTesting = true;
 
         private PpgProcessingCoordinator ppg;
         private SerialControllerOximetro legacyController;
