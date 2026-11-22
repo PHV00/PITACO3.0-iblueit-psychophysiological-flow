@@ -6,6 +6,31 @@ using UnityEngine;
 namespace Ibit.Core.Oximetry
 {
     /// <summary>
+    /// Read-only observation of a received firmware sample frame. Does not
+    /// declare the sample SQI-approved or suitable for clinical interpretation.
+    /// </summary>
+    public sealed class PpgRawSample
+    {
+        public readonly int Sequence;
+        public readonly long DeviceTimeMs;
+        public readonly int Red;
+        public readonly int Ir;
+        public readonly bool? Contact;
+        public readonly int? SqiReason;
+
+        public PpgRawSample(int sequence, long deviceTimeMs, int red, int ir,
+            bool? contact, int? sqiReason)
+        {
+            Sequence = sequence;
+            DeviceTimeMs = deviceTimeMs;
+            Red = red;
+            Ir = ir;
+            Contact = contact;
+            SqiReason = sqiReason;
+        }
+    }
+
+    /// <summary>
     /// Diagnostic results ONLY. SpO2DemoPercent is an uncalibrated demonstration
     /// and must not be connected to patient alerts, rewards, or medical decisions.
     /// </summary>
@@ -329,6 +354,8 @@ namespace Ibit.Core.Oximetry
         // and actual valid PPG. These counters do not change the signal path.
         public long JsonCallbacksReceived => jsonCallbacksReceived;
         public long ReceivedSampleFrames => receivedSampleFrames;
+        // Observational raw tap, independent of the 8-second estimator buffer.
+        public event Action<PpgRawSample> OnRawSample;
         public event Action<PpgMeasurement> OnMeasurement;
 
         // Display-only aggregates for the latest <=60 seconds, not a new
@@ -887,6 +914,19 @@ namespace Ibit.Core.Oximetry
             }
 
             receivedSampleFrames++;
+            // Publish the original RED/IR frame before contact/G1 filtering.
+            // A recorder error must never change SQI or estimation behavior.
+            try
+            {
+                OnRawSample?.Invoke(new PpgRawSample(
+                    frame.seq, frame.t_ms, frame.ppg.red, frame.ppg.ir,
+                    frame.sqi != null ? (bool?)frame.sqi.contact : null,
+                    frame.sqi != null ? (int?)frame.sqi.reason : null));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[PPG RAW OBSERVER] " + ex.Message);
+            }
             if (frame.t_ms >= 0 && frame.t_ms <= uint.MaxValue)
             {
                 lastObservedDeviceMs = (uint)frame.t_ms;
