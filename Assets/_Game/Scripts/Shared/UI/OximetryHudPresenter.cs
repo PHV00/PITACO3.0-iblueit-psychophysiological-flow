@@ -58,13 +58,15 @@ namespace Ibit.Core.Oximetry.UI
 
             if (coordinator == null)
             {
-                SetText(ConnectedPrefix + "PPG: processamento ausente", "NO_COORDINATOR");
+                SetText(ConnectedPrefix + FormatPitaco24Table(null, null) +
+                    "\nPPG: processamento ausente", "NO_COORDINATOR");
                 return;
             }
 
             if (coordinator.JsonCallbacksReceived == 0)
             {
-                SetText(ConnectedPrefix + (serial != null && serial.JsonMessagesReceived > 0
+                SetText(ConnectedPrefix + FormatPitaco24Table(null, null) +
+                    "\n" + (serial != null && serial.JsonMessagesReceived > 0
                     ? "PPG: JSON nao encaminhado"
                     : "PPG: aguardando JSON"), "WAIT_JSON");
                 return;
@@ -72,7 +74,8 @@ namespace Ibit.Core.Oximetry.UI
 
             if (coordinator.ReceivedSampleFrames == 0)
             {
-                SetText(ConnectedPrefix + "PPG: JSON sem amostras RED/IR", "WAIT_SAMPLES");
+                SetText(ConnectedPrefix + FormatPitaco24Table(null, null) +
+                    "\nPPG: JSON sem amostras RED/IR", "WAIT_SAMPLES");
                 return;
             }
 
@@ -80,9 +83,13 @@ namespace Ibit.Core.Oximetry.UI
             // selects an informative message when that coordinator has no contact.
             if (!coordinator.OpticalContactConfirmed)
             {
-                SetText(FormatNoContactStatus(placement != null && placement.SessionActive
-                    ? placement.State
-                    : FingerPlacementState.WaitingForData), "NO_CONTACT");
+                string contactStatus = FormatNoContactStatus(
+                    placement != null && placement.SessionActive
+                        ? placement.State
+                        : FingerPlacementState.WaitingForData);
+                SetText(ConnectedPrefix + FormatPitaco24Table(null, null) +
+                    "\n" + contactStatus.Substring(ConnectedPrefix.Length),
+                    "NO_CONTACT");
                 return;
             }
 
@@ -93,7 +100,7 @@ namespace Ibit.Core.Oximetry.UI
                 string reason = coordinator.Gate01Status == "Failed"
                     ? "G1 reprovado: aguardando sinal valido"
                     : "aguardando aprovacao G1";
-                SetText(ConnectedPrefix + FormatPitaco24Values(null, null) +
+                SetText(ConnectedPrefix + FormatPitaco24Table(null, null) +
                     "\nPPG: " + reason, "G1_BLOCK");
                 return;
             }
@@ -104,8 +111,8 @@ namespace Ibit.Core.Oximetry.UI
                 // frames only. The Mixer continues reading LastMeasurement,
                 // which has already been invalidated by the coordinator.
                 var held = coordinator.HudMeasurement;
-                SetText(ConnectedPrefix + FormatPitaco24Values(
-                    held.BpmEstimate, held.SpO2DemoPercent) +
+                SetText(ConnectedPrefix + FormatPitaco24Table(
+                    held.BpmEstimate, held.SpO2DemoPercent, true, true) +
                     "\nPPG: ultima leitura (contato instavel)", "HOLD_VISUAL_ONLY");
                 return;
             }
@@ -116,9 +123,10 @@ namespace Ibit.Core.Oximetry.UI
                 // is shown as an explicitly historical value, never as live.
                 // Bridge/Mixer continue to see null for rejected BPM.
                 var latest = coordinator.HudMeasurement;
-                SetText(ConnectedPrefix + FormatPitaco24Values(
+                SetText(ConnectedPrefix + FormatPitaco24Table(
                     coordinator.HudRetainedBpmVisualOnly,
-                    latest != null ? latest.SpO2DemoPercent : null) +
+                    latest != null ? latest.SpO2DemoPercent : null,
+                    true, false) +
                     "\nPPG: BPM ultima leitura (estimador reavaliando)",
                     "BPM_HOLD_VISUAL_ONLY");
                 return;
@@ -128,7 +136,7 @@ namespace Ibit.Core.Oximetry.UI
             {
                 // Explicit unavailable state instead of an unexplained HUD
                 // reset. No clinical or gameplay authority is inferred here.
-                SetText(ConnectedPrefix + FormatPitaco24Values(null, null) +
+                SetText(ConnectedPrefix + FormatPitaco24Table(null, null) +
                     "\nPPG: aguardando estimativa valida", "WAIT_ESTIMATE");
                 return;
             }
@@ -138,7 +146,7 @@ namespace Ibit.Core.Oximetry.UI
             // measurement now reaches all three game scenes without a stale
             // intermediary or misleading last-value lag.
             var live = coordinator.HudMeasurement;
-            SetText(ConnectedPrefix + FormatPitaco24Values(
+            SetText(ConnectedPrefix + FormatPitaco24Table(
                 live.BpmEstimate, live.SpO2DemoPercent), "LIVE");
         }
 
@@ -199,6 +207,40 @@ namespace Ibit.Core.Oximetry.UI
                 default:
                     return ConnectedPrefix + "PPG: sem contato optico";
             }
+        }
+
+        // HUD-only averages; never fed back into the signal-quality pipeline.
+        private string FormatPitaco24Table(double? bpm, double? spo2Demo,
+            bool heldBpm = false, bool heldSpo2 = false)
+        {
+            double? bpmMean = null, spo2Mean = null;
+            int bpmCount = 0, spo2Count = 0;
+            if (coordinator != null)
+                coordinator.GetHudTrend60Seconds(
+                    out bpmMean, out bpmCount, out spo2Mean, out spo2Count);
+
+            string currentBpm = FormatHudValue(bpm) +
+                (heldBpm && bpm.HasValue ? "*" : "");
+            string currentSpo2 = FormatHudValue(spo2Demo) +
+                (heldSpo2 && spo2Demo.HasValue ? "*" : "");
+
+            // A mean can start with fewer than 60s of valid samples.
+            // Counts make partial coverage explicit; no gaps are filled in.
+            return "CAPTURA ATUAL  | VALOR\n" +
+                "BPM            | " + currentBpm + " bpm\n" +
+                "Oxigenacao DEMO| " + currentSpo2 + " %\n" +
+                "MEDIA MOVEL (ATE 60 s)\n" +
+                "BPM por 60 s   | " + FormatHudValue(bpmMean) + " bpm\n" +
+                "Oxig. por 60 s | " + FormatHudValue(spo2Mean) + " % DEMO\n" +
+                "Aprovadas/60s: BPM=" + bpmCount + " O2=" + spo2Count +
+                "\nDEMO nao calibrada; *leitura retida";
+        }
+
+        private static string FormatHudValue(double? value)
+        {
+            return value.HasValue
+                ? value.Value.ToString("F1", CultureInfo.InvariantCulture)
+                : "--";
         }
 
         public static string FormatPitaco24Values(double? bpm, double? spo2Demo)
