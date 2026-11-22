@@ -20,9 +20,9 @@ Nenhuma segunda porta USB/COM foi criada.
    de contato/G1. O novo evento é apenas observacional.
 3. PpgProcessingCoordinator.OnMeasurement fornece estimativas processadas
    de BPM e SpO2 DEMO, inclusive valores individuais ausentes.
-4. PlataformLogger inicia e finaliza Pitaco3DataRecorder conforme
-   StartLogging/StopLogging da etapa; não reinicia quando a conexão repete
-   StartStage.
+4. PlataformLogger inicia Pitaco3DataRecorder a partir do evento
+   StageManager.OnStageStart e finaliza junto ao StopLogging da etapa.
+   Uma reconexão que dispare StartStage novamente não reinicia a captura.
 5. Quando o PITACO moderno foi identificado, PlataformLogger cria um
    FlowDataDevice com deviceName "Pitaco 3.0", contendo:
    - flowData[] — série respiratória legada;
