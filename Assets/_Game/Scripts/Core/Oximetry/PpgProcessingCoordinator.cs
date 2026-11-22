@@ -118,6 +118,33 @@ namespace Ibit.Core.Oximetry
         private float nextCalculationTraceAt;
 
         private readonly PpgSampleBuffer buffer = new PpgSampleBuffer();
+
+        // HUD-only rolling averages. Independent of the estimator's 8s buffer,
+        // firmware G1 and the source-aware Bridge/Mixer contract.
+        // At most one approved reading per second is counted per metric;
+        // invalid estimates and visual-only holds never enter these queues.
+        private const float HudTrendWindowSeconds = 60f;
+        private const float HudTrendMinIntervalSeconds = 1f;
+        private struct HudTrendReading
+        {
+            public readonly float At;
+            public readonly double Value;
+
+            public HudTrendReading(float at, double value)
+            {
+                At = at;
+                Value = value;
+            }
+        }
+
+        private readonly Queue<HudTrendReading> bpmHudTrend =
+            new Queue<HudTrendReading>();
+        private readonly Queue<HudTrendReading> spo2HudTrend =
+            new Queue<HudTrendReading>();
+        private double bpmHudTrendSum;
+        private double spo2HudTrendSum;
+        private float lastBpmHudTrendAt = -1f;
+        private float lastSpo2HudTrendAt = -1f;
         // Independent timing diagnostics, never an alternative G1/SQI gate.
         private readonly PpgMonotonicClockAligner deviceClock =
             new PpgMonotonicClockAligner();
@@ -303,6 +330,80 @@ namespace Ibit.Core.Oximetry
         public long JsonCallbacksReceived => jsonCallbacksReceived;
         public long ReceivedSampleFrames => receivedSampleFrames;
         public event Action<PpgMeasurement> OnMeasurement;
+
+        // Display-only aggregates for the latest <=60 seconds, not a new
+        // physiological measurement. Each metric uses only its own approved
+        // publications; skipped/blocked seconds are not filled in.
+        public void GetHudTrend60Seconds(out double? bpmMean, out int bpmCount,
+            out double? spo2DemoMean, out int spo2Count)
+        {
+            PruneHudTrend(Time.unscaledTime);
+            bpmCount = bpmHudTrend.Count;
+            spo2Count = spo2HudTrend.Count;
+            bpmMean = bpmCount > 0
+                ? (double?)(bpmHudTrendSum / bpmCount) : null;
+            spo2DemoMean = spo2Count > 0
+                ? (double?)(spo2HudTrendSum / spo2Count) : null;
+        }
+
+        private void RecordHudTrend(PpgMeasurement measurement)
+        {
+            // Must not turn a queued/stale or rejected publication into a
+            // seemingly stable 60s result. No history enters the game agent.
+            if (measurement == null || !OpticalContactConfirmed ||
+                !Gate01Approved ||
+                LastPublishedQueueLagMs > MaximumLivePublicationQueueLagMs ||
+                !PublishedClockFresh)
+                return;
+
+            float now = Time.unscaledTime;
+            PruneHudTrend(now);
+            if (measurement.BpmEstimate.HasValue &&
+                !double.IsNaN(measurement.BpmEstimate.Value) &&
+                !double.IsInfinity(measurement.BpmEstimate.Value) &&
+                measurement.BpmEstimate.Value > 0 &&
+                (lastBpmHudTrendAt < 0f ||
+                 now - lastBpmHudTrendAt >= HudTrendMinIntervalSeconds))
+            {
+                bpmHudTrend.Enqueue(new HudTrendReading(
+                    now, measurement.BpmEstimate.Value));
+                bpmHudTrendSum += measurement.BpmEstimate.Value;
+                lastBpmHudTrendAt = now;
+            }
+            if (measurement.SpO2DemoPercent.HasValue &&
+                !double.IsNaN(measurement.SpO2DemoPercent.Value) &&
+                !double.IsInfinity(measurement.SpO2DemoPercent.Value) &&
+                measurement.SpO2DemoPercent.Value > 0 &&
+                measurement.SpO2DemoPercent.Value <= 100 &&
+                (lastSpo2HudTrendAt < 0f ||
+                 now - lastSpo2HudTrendAt >= HudTrendMinIntervalSeconds))
+            {
+                spo2HudTrend.Enqueue(new HudTrendReading(
+                    now, measurement.SpO2DemoPercent.Value));
+                spo2HudTrendSum += measurement.SpO2DemoPercent.Value;
+                lastSpo2HudTrendAt = now;
+            }
+        }
+
+        private void PruneHudTrend(float now)
+        {
+            while (bpmHudTrend.Count > 0 &&
+                   now - bpmHudTrend.Peek().At > HudTrendWindowSeconds)
+                bpmHudTrendSum -= bpmHudTrend.Dequeue().Value;
+            while (spo2HudTrend.Count > 0 &&
+                   now - spo2HudTrend.Peek().At > HudTrendWindowSeconds)
+                spo2HudTrendSum -= spo2HudTrend.Dequeue().Value;
+        }
+
+        private void ClearHudTrend()
+        {
+            bpmHudTrend.Clear();
+            spo2HudTrend.Clear();
+            bpmHudTrendSum = 0;
+            spo2HudTrendSum = 0;
+            lastBpmHudTrendAt = -1f;
+            lastSpo2HudTrendAt = -1f;
+        }
         // Independent of 8-second processing: one contact observation per
         // sample. A missing sqi object is NOT treated as proof of finger-off.
         public event Action<bool> OnOpticalContactSample;
@@ -601,6 +702,9 @@ namespace Ibit.Core.Oximetry
 
         private void ResetMeasurements(string status)
         {
+            // Different contact, device epoch or telemetry session: do not
+            // mix their readings in a single rolling HUD statistic.
+            ClearHudTrend();
             InvalidatePpgWindow(status);
             OpticalContactConfirmed = false;
             consecutiveNoContactSamples = 0;
@@ -960,6 +1064,7 @@ namespace Ibit.Core.Oximetry
             bool continuous = buffer.Add(sample);
             if (!continuous)
             {
+                ClearHudTrend();
                 Trace("SEQUENCE_RESET", "seq=" + sample.Sequence +
                     " | devMs=" + sample.TimeMs +
                     " | bufferNow=" + buffer.Count);
@@ -1136,6 +1241,7 @@ namespace Ibit.Core.Oximetry
             LastPublishedAlignedSampleAgeAtPublishSeconds =
                 double.IsNaN(alignedMs) || double.IsInfinity(alignedMs)
                     ? float.NaN : (float)(alignedMs / 1000.0);
+            RecordHudTrend(LastMeasurement);
             OnMeasurement?.Invoke(LastMeasurement);
 
 
