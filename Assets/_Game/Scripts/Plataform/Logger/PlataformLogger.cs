@@ -54,15 +54,15 @@ namespace Ibit.Plataform.Logger
             _pitaco3Recorder = GetComponent<Pitaco3DataRecorder>();
             if (_pitaco3Recorder == null)
                 _pitaco3Recorder = gameObject.AddComponent<Pitaco3DataRecorder>();
-            FindObjectOfType<StageManager>().OnStageEnd += StopLogging;
+            var stageManager = FindObjectOfType<StageManager>();
+            stageManager.OnStageStart += StartPitaco3Capture;
+            stageManager.OnStageEnd += StopLogging;
         }
         
-        // The historian shares exactly the existing scene logger's start/end.
-        // This avoids clearing a stage on a repeated StageManager.StartStage().
-        public override void StartLogging()
+        // The legacy logger starts on scene load; optical history must start
+        // only when StageManager declares that the actual stage has begun.
+        private void StartPitaco3Capture()
         {
-            if (isLogging) return;
-            base.StartLogging();
             if (_pitaco3Recorder != null) _pitaco3Recorder.StartCapture();
         }
 
