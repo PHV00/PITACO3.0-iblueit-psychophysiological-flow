@@ -9,6 +9,7 @@ namespace Assets._Game.Scripts.Core.Api.Dto
     public class PlataformOverviewSendDto
     {
         [JsonProperty("pacientId")] public string PacientId { get; set; }
+        [JsonProperty("clientRunId", NullValueHandling = NullValueHandling.Ignore)] public string ClientRunId { get; set; }
         [JsonProperty("flowDataDevices")] public List<FlowDataDevice> FlowDataDevices { get; set; }
         [JsonProperty("playStart")] public DateTime PlayStart { get; set; }
         [JsonProperty("playFinish")] public DateTime PlayFinish { get; set; }
