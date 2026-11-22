@@ -117,6 +117,14 @@ namespace Ibit.Core.Data.Manager
         {
             var plataformOverviewSendDto = await DataManagerUtil.LoadJsonFileAsync<PlataformOverviewSendDto>(plataformOverviewPath);
             plataformOverviewSendDto.PacientId = pacientId;
+            // Keep queued PITACO 3.0 stage data untouched during the Unity-only
+            // phase; the current backend would reject it (HTTP 400).
+            if (!DataManager.Pitaco3BackendReady &&
+                plataformOverviewSendDto.FlowDataDevices != null &&
+                plataformOverviewSendDto.FlowDataDevices.Exists(
+                    device => device != null &&
+                              device.DeviceName == DataManager.Pitaco3DeviceName))
+                return false;
 
             var apiResponse = await ApiClient.Instance.SavePlataformOverview(plataformOverviewSendDto);
 
