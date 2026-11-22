@@ -165,7 +165,25 @@ namespace Ibit.Plataform.Manager.Stage
 
             if (!recalibrated && Mathf.Round(Duration) == 10f)
             {
-                FindObjectOfType<SerialControllerPitaco>().Recalibrate();
+                var manager = PitacoConnectionManager.Active;
+                var version = manager != null
+                    ? manager.ConnectedVersion
+                    : PitacoConnectionManager.Version.None;
+
+                // Preserve the legacy PITACO 2.0 recalibration. On PITACO 2.4,
+                // the same "c" command temporarily stops PPG acquisition and
+                // invalidates its G1 / rolling 8-second measurement window.
+                if (version == PitacoConnectionManager.Version.Pitaco20)
+                {
+                    serialControllerPitaco.Recalibrate();
+                    Debug.Log("[PITACO-CAL] phase=STAGE_10S | version=Pitaco20 | action=RECALIBRATE");
+                }
+                else
+                {
+                    Debug.Log("[PITACO-CAL] phase=STAGE_10S | version=" + version +
+                              " | action=SKIP_RECALIBRATE");
+                }
+
                 recalibrated = true;
             }
                 
