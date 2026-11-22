@@ -3,11 +3,17 @@ using System.Threading.Tasks;
 using Assets._Game.Scripts.Core.Api;
 using Assets._Game.Scripts.Core.Api.Dto;
 using Assets._Game.Scripts.Core.Configuration;
+using UnityEngine;
 
 namespace Ibit.Core.Data.Manager
 {
     public sealed class DataManager
     {
+        // Phase 1 (Unity-only): preserve PITACO 3.0 JSON locally. Switch
+        // this only after the deployed backend accepts/validates all arrays.
+        public const bool Pitaco3BackendReady = false;
+        public const string Pitaco3DeviceName = "Pitaco 3.0";
+
         public static DataManager Instance { get; } = new DataManager();
 
         static DataManager() { }
@@ -63,10 +69,28 @@ namespace Ibit.Core.Data.Manager
         {
             var response = new DataManagerReponse<PlataformOverviewDto, PlataformOverviewSendDto>();
 
-            LocalDataManager.Instance.SaveLocalData("PlataformOverview", plataform, Pacient.Loaded.Name);
+            bool locallySaved = LocalDataManager.Instance.SaveLocalData(
+                "PlataformOverview", plataform, Pacient.Loaded.Name);
+            if (!locallySaved)
+                Debug.LogError("[PITACO3-RECORD] Falha ao salvar o JSON local da etapa.");
 
             if (!ConfigurationManager.SendRemoteData || string.IsNullOrWhiteSpace(ConfigurationManager.GameApiToken))
                 return response;
+
+            // Existing production API rejects deviceName="Pitaco 3.0". Never
+            // lose the local capture or accidentally POST an unsupported DTO.
+            bool hasPitaco3 = plataform.FlowDataDevices != null &&
+                plataform.FlowDataDevices.Exists(device =>
+                    device != null && device.DeviceName == Pitaco3DeviceName);
+            if (hasPitaco3 && !Pitaco3BackendReady)
+            {
+                bool queued = LocalDataManager.Instance.SaveRemoteData(
+                    "PlataformOverview", plataform, Pacient.Loaded.IdApi);
+                if (queued) response.LocalResponse = plataform;
+                else Debug.LogError("[PITACO3-RECORD] Falha ao preparar reenvio remoto.");
+                Debug.LogWarning("[PITACO3-RECORD] Upload suspenso ate a API aceitar o novo schema.");
+                return response;
+            }
 
             var hasInternetConnection = await ApiClient.Instance.HasInternetConnection();
             if (!hasInternetConnection)
