@@ -6,6 +6,7 @@ using Ibit.Core.Data.Manager;
 using Ibit.Core.Game;
 using Ibit.Core.Util;
 using Ibit.Core.Serial;
+using Ibit.Core.Oximetry.Integration;
 using Ibit.Plataform.Data;
 using Ibit.Plataform.Manager.Score;
 using Ibit.Plataform.Manager.Spawn;
@@ -30,6 +31,7 @@ namespace Ibit.Plataform.Logger
         private ManoLogger _manoLogger;
         private CintaLogger _cintaLogger;
         private OximetroLogger _oximetroLogger;
+        private Pitaco3DataRecorder _pitaco3Recorder;
         [SerializeField] private ToggleGroup borgScaleToggleGroup;
         public static int selectedBorgScale = 4;
 
@@ -49,9 +51,28 @@ namespace Ibit.Plataform.Logger
             _manoLogger = FindObjectOfType<ManoLogger>();
             _cintaLogger = FindObjectOfType<CintaLogger>();
             _oximetroLogger = FindObjectOfType<OximetroLogger>();
+            _pitaco3Recorder = GetComponent<Pitaco3DataRecorder>();
+            if (_pitaco3Recorder == null)
+                _pitaco3Recorder = gameObject.AddComponent<Pitaco3DataRecorder>();
             FindObjectOfType<StageManager>().OnStageEnd += StopLogging;
         }
         
+        // The historian shares exactly the existing scene logger's start/end.
+        // This avoids clearing a stage on a repeated StageManager.StartStage().
+        public override void StartLogging()
+        {
+            if (isLogging) return;
+            base.StartLogging();
+            if (_pitaco3Recorder != null) _pitaco3Recorder.StartCapture();
+        }
+
+        public override void StopLogging()
+        {
+            if (!isLogging) return;
+            if (_pitaco3Recorder != null) _pitaco3Recorder.StopCapture();
+            base.StopLogging();
+        }
+
         //DeepDDA: Métodos BorgScale referente ao FR-02.04 "Ajuste de Carga POR MEIO DA ESCALA DE BORG"
         protected override void Save()
         {
@@ -195,14 +216,30 @@ namespace Ibit.Plataform.Logger
                 PlayStart = recordStart,
                 PlayFinish = recordStop,
                 FlowDataDevices = new List<FlowDataDevice>(),
-                BorgScale = selectedBorgScale
+                BorgScale = selectedBorgScale,
+                ClientRunId = _pitaco3Recorder != null ? _pitaco3Recorder.ClientRunId : null
             };
 
 
-            if (scp.IsConnected) // Se PITACO conectado
+            bool isModernPitaco =
+                (PitacoConnectionManager.Active != null &&
+                 PitacoConnectionManager.Active.ConnectedVersion ==
+                    PitacoConnectionManager.Version.Pitaco24) ||
+                (_pitaco3Recorder != null && _pitaco3Recorder.HasObservedModernDevice);
+            if ((scp != null && scp.IsConnected) || isModernPitaco)
             {
-                Debug.Log("PlatformLogger - Device: Pitaco.");
-                plataformOverviewSendDto.FlowDataDevices.Add(_pitacoLogger.flowDataDevice);
+                if (isModernPitaco && _pitaco3Recorder != null)
+                {
+                    Debug.Log("PlatformLogger - Device: Pitaco 3.0 (local-only, backend pending).");
+                    plataformOverviewSendDto.FlowDataDevices.Add(
+                        _pitaco3Recorder.BuildDeviceSnapshot(
+                            _pitacoLogger != null ? _pitacoLogger.flowDataDevice : null));
+                }
+                else
+                {
+                    Debug.Log("PlatformLogger - Device: Pitaco (legacy).");
+                    plataformOverviewSendDto.FlowDataDevices.Add(_pitacoLogger.flowDataDevice);
+                }
             } else {
             if (scm.IsConnected) // Se MANO conectado
             {
@@ -223,8 +260,12 @@ namespace Ibit.Plataform.Logger
 
 
             var plataformResponse = await DataManager.Instance.SavePlataformOverview(plataformOverviewSendDto);
-            if (plataformResponse.ApiResponse == null)
+            bool pitaco3LocalOnly = plataformOverviewSendDto.FlowDataDevices.Exists(
+                device => device.DeviceName == Pitaco3DataRecorder.DeviceName);
+            if (plataformResponse.ApiResponse == null && !pitaco3LocalOnly)
                 SysMessage.Info("Erro ao salvar dados da plataforma na nuvem!\n Os dados poderão ser enviados posteriormente.");
+            else if (pitaco3LocalOnly)
+                Debug.Log("[PITACO3-RECORD] JSON local e pendencia preparados; envio Atlas depende do backend.");
 
             GameObject.Find("Canvas").transform.Find("SavingBgPanel").gameObject.SetActive(false);
 
