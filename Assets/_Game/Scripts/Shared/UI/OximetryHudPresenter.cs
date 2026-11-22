@@ -231,9 +231,9 @@ namespace Ibit.Core.Oximetry.UI
                 "Oxigenacao DEMO| " + currentSpo2 + " %\n" +
                 "MEDIA MOVEL (ATE 60 s)\n" +
                 "BPM por 60 s   | " + FormatHudValue(bpmMean) + " bpm\n" +
-                "Oxig. por 60 s | " + FormatHudValue(spo2Mean) + " % DEMO\n" +
+                "Oxigenacao por 60 s | " + FormatHudValue(spo2Mean) + " % DEMO\n" +
                 "Aprovadas/60s: BPM=" + bpmCount + " O2=" + spo2Count +
-                "\nDEMO nao calibrada; *leitura retida";
+                "\nMedias = historico; DEMO nao calibrada; *retida";
         }
 
         private static string FormatHudValue(double? value)
