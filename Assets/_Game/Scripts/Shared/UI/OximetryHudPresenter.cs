@@ -61,7 +61,7 @@ namespace Ibit.Core.Oximetry.UI
             // appending diagnostics after a long table outside the text bounds.
             if (coordinator == null)
             {
-                SetText(FormatPitaco24Compact("sem processamento", null, null),
+                SetText(FormatPitaco24Compact("sem PPG", null, null),
                     "NO_COORDINATOR");
                 return;
             }
@@ -69,14 +69,14 @@ namespace Ibit.Core.Oximetry.UI
             if (coordinator.JsonCallbacksReceived == 0)
             {
                 string label = serial != null && serial.JsonMessagesReceived > 0
-                    ? "JSON nao encaminhado" : "aguardando JSON";
+                    ? "erro JSON" : "aguardando JSON";
                 SetText(FormatPitaco24Compact(label, null, null), "WAIT_JSON");
                 return;
             }
 
             if (coordinator.ReceivedSampleFrames == 0)
             {
-                SetText(FormatPitaco24Compact("aguardando RED/IR", null, null),
+                SetText(FormatPitaco24Compact("aguardando PPG", null, null),
                     "WAIT_SAMPLES");
                 return;
             }
@@ -142,7 +142,7 @@ namespace Ibit.Core.Oximetry.UI
 
             if (!coordinator.HudHasRecentLiveMeasurement)
             {
-                SetText(FormatPitaco24Compact("aguardando leitura", null, null),
+                SetText(FormatPitaco24Compact("aguardando BPM/O2", null, null),
                     "WAIT_ESTIMATE");
                 return;
             }
@@ -226,14 +226,16 @@ namespace Ibit.Core.Oximetry.UI
 
             string currentBpm = FormatHudValue(bpm) +
                 (heldBpm && bpm.HasValue ? "*" : "");
-            string currentSpo2 = FormatHudValue(spo2Demo) +
-                (heldSpo2 && spo2Demo.HasValue ? "*" : "");
+            string currentSpo2 = spo2Demo.HasValue
+                ? FormatHudValue(spo2Demo) + "%" + (heldSpo2 ? "*" : "")
+                : "--";
+            string meanSpo2 = spo2Mean.HasValue
+                ? FormatHudValue(spo2Mean) + "%" : "--";
 
             return "PITACO 2.4: " + state + "\n" +
                 "BPM atual: " + currentBpm + " | 60s: " +
                 FormatHudValue(bpmMean) + "\n" +
-                "O2 DEMO: " + currentSpo2 + "% | 60s: " +
-                FormatHudValue(spo2Mean) + "%";
+                "O2 DEMO: " + currentSpo2 + " | 60s: " + meanSpo2;
         }
 
         private static string FormatHudValue(double? value)
