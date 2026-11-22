@@ -229,9 +229,9 @@ namespace Ibit.Core.Oximetry.UI
             string currentSpo2 = FormatHudValue(spo2Demo) +
                 (heldSpo2 && spo2Demo.HasValue ? "*" : "");
 
-            return "PITACO 2.4: " + state + "\\n" +
+            return "PITACO 2.4: " + state + "\n" +
                 "BPM atual: " + currentBpm + " | 60s: " +
-                FormatHudValue(bpmMean) + "\\n" +
+                FormatHudValue(bpmMean) + "\n" +
                 "O2 DEMO: " + currentSpo2 + "% | 60s: " +
                 FormatHudValue(spo2Mean) + "%";
         }
