@@ -39,6 +39,9 @@ namespace Ibit.Core.Serial
         [SerializeField] private int reconnectionDelay = 1000;
         [SerializeField] private int reopenSettleTimeMs = 1200;
         [SerializeField] private bool startSamplingOnConnect = true;
+        // Progress counters are now summarized by PpgProcessingCoordinator.
+        // Keep connection/error messages, suppress JSON:100/200/... noise.
+        private static readonly bool EnableVerboseJsonProgress = false;
         [SerializeField] private int logEveryNJsonMessages = 100;
 
         private SerialThreadPitaco24 serialThread;
@@ -212,12 +215,22 @@ namespace Ibit.Core.Serial
             if (!IsConnected || string.IsNullOrEmpty(message)) return;
             OnSerialMessageReceived?.Invoke(message);
             string line = message.Trim();
+            // Firmware side-channel diagnostics never enter OnJsonReceived,
+            // so surface them explicitly without changing the protocol.
+            if (line.StartsWith("X,PPG_", StringComparison.Ordinal) ||
+                line.StartsWith("X,MAX30105_", StringComparison.Ordinal))
+            {
+                Debug.Log("[PITACO-FW] " + line +
+                    " | unityQueueLagMs=" +
+                    (PitacoConnectionManager.Active != null
+                        ? PitacoConnectionManager.Active.CurrentDispatchQueueLagMs : 0));
+            }
             if (!line.StartsWith("{", StringComparison.Ordinal) ||
                 !line.EndsWith("}", StringComparison.Ordinal))
                 return;
             JsonMessagesReceived++;
             OnJsonReceived?.Invoke(line);
-            if (logEveryNJsonMessages > 0 && JsonMessagesReceived % logEveryNJsonMessages == 0)
+            if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 && JsonMessagesReceived % logEveryNJsonMessages == 0)
                 Debug.Log("[PITACO 2.4] JSON: " + JsonMessagesReceived +
                           " | descartes da fila: " + PitacoConnectionManager.Active.DroppedLines);
         }
@@ -273,7 +286,7 @@ namespace Ibit.Core.Serial
                         JsonMessagesReceived++;
                         OnJsonReceived?.Invoke(line);
 
-                        if (logEveryNJsonMessages > 0 &&
+                        if (EnableVerboseJsonProgress && logEveryNJsonMessages > 0 &&
                             JsonMessagesReceived % logEveryNJsonMessages == 0)
                         {
                             Debug.Log("[PITACO 2.4] JSON: " + JsonMessagesReceived +

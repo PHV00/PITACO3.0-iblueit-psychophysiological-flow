@@ -2,6 +2,7 @@
 // Os controladores existentes continuam responsaveis por eventos/protocolos.
 using System;
 using System.Collections.Generic;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
@@ -9,6 +10,7 @@ using System.Threading;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Ibit.Core.Oximetry;
+using Ibit.Core.Oximetry.Integration;
 using Ibit.Core.Oximetry.Placement;
 
 namespace Ibit.Core.Serial
@@ -17,13 +19,17 @@ namespace Ibit.Core.Serial
     public sealed class PitacoConnectionManager : MonoBehaviour
     {
         public enum Version { None, Pitaco20, Pitaco24 }
-        private enum PacketKind { Connected, Disconnected, Line, Warning }
+        private enum PacketKind { Connected, Disconnected, Line, Warning, CommandTrace }
 
         private sealed class Packet
         {
             public PacketKind Kind;
             public Version DeviceVersion;
             public string Text;
+            public int EnqueuedTick;
+            // Stopwatch time at full-line receipt on the USB worker, BEFORE
+            // main-thread dispatch or Unity scene loading delays.
+            public long ArrivalMonotonicTicks;
         }
 
         public static PitacoConnectionManager Active { get; private set; }
@@ -34,7 +40,10 @@ namespace Ibit.Core.Serial
         [SerializeField] private int handshakeTimeoutMs = 3000;
         [SerializeField] private int scanRetryMs = 5000;
         [SerializeField] private int maxPendingLines = 2048;
-        [SerializeField] private int maxLinesPerFrame = 256;
+        // Limit the cost of a post-stall burst on the Unity main thread.
+        // At ~45 serial lines/s, 64 per frame leaves generous normal margin.
+        // A backlog is drained over several frames instead of one spike.
+        [SerializeField] private int maxLinesPerFrame = 64;
         [SerializeField] private string preferredPort = "";
 
         private readonly object inboundLock = new object();
@@ -48,9 +57,37 @@ namespace Ibit.Core.Serial
         private Version activeVersion;
         private int pendingLines;
         private long droppedLines;
+        private int peakPendingLines;
+        private long queueBudgetExhaustions;
+        private int peakQueueLagMs;
+        // Age since the USB worker enqueued the line currently being dispatched.
+        // Valid only during synchronous ManagedLine -> OnMeasurement callbacks.
+        private int currentDispatchQueueLagMs;
+        private long currentDispatchArrivalTicks;
+
+        // Interval counters: serial producer versus Unity main-thread consumer.
+        // Diagnostics only; never throttle, re-order or discard additional lines.
+        private long enqueuedLinesTotal;
+        private long dispatchedLinesTotal;
+        private long loggedEnqueuedLines;
+        private long loggedDispatchedLines;
+        private long loggedDroppedLines;
+        private int diagnosticStartTick;
+        private int previousUpdateTick;
+        private int peakUpdateGapMs;
+        private int peakDispatchWorkMs;
+        private int peakIntervalQueueLagMs;
+        private const int QueueDiagnosticIntervalMs = 10000;
 
         public Version ConnectedVersion => activeVersion;
         public long DroppedLines => Interlocked.Read(ref droppedLines);
+        public int PendingLines { get { lock (inboundLock) return pendingLines; } }
+        public int PeakPendingLines => Volatile.Read(ref peakPendingLines);
+        public long QueueBudgetExhaustions => Interlocked.Read(ref queueBudgetExhaustions);
+        public int PeakQueueLagMs => Volatile.Read(ref peakQueueLagMs);
+        public int CurrentDispatchQueueLagMs => currentDispatchQueueLagMs;
+        // Valid only in the synchronous ManagedLine/OnJsonReceived callback.
+        public long CurrentDispatchArrivalTicks => currentDispatchArrivalTicks;
 
         // A instancia e criada ANTES dos Awake dos controladores em qualquer cena.
         // Nao e necessario editar prefabs ou duplicar gerenciadores entre cenas.
@@ -65,6 +102,7 @@ namespace Ibit.Core.Serial
             // The modern serial controller forwards data; it does NOT open another COM.
             go.AddComponent<SerialControllerPitaco24>();
             go.AddComponent<PpgProcessingCoordinator>();
+            go.AddComponent<OximetryDataBridge>();
             // Positioning state machine, presentation and independent pause.
             // All share this existing serial manager; no second COM port.
             go.AddComponent<FingerPlacementMonitor>();
@@ -88,6 +126,8 @@ namespace Ibit.Core.Serial
             BindControllers();
             worker = new Thread(ScanAndRead) { IsBackground = true, Name = "PitacoSerialManager" };
             worker.Start();
+            diagnosticStartTick = Environment.TickCount;
+            previousUpdateTick = diagnosticStartTick;
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -135,15 +175,25 @@ namespace Ibit.Core.Serial
         {
             if (string.IsNullOrEmpty(command)) return;
             lock (outboundLock) outbound.Enqueue(command);
+            // This means requested, NOT necessarily written to the device.
+            Debug.Log("[PITACO-CMD] phase=QUEUED | command=" + command +
+                " | version=" + activeVersion);
         }
 
         private void Update()
         {
+            int frameStartTick = Environment.TickCount;
+            int frameGapMs = unchecked(frameStartTick - previousUpdateTick);
+            if (frameGapMs >= 0 && frameGapMs > peakUpdateGapMs)
+                peakUpdateGapMs = frameGapMs;
+            previousUpdateTick = frameStartTick;
+
             // Objetos de cena ja sao vinculados em sceneLoaded. Verificacao
             // eventual cobre instanciacao dinamica sem buscar a cada frame.
             if (Time.frameCount % 60 == 0)
                 BindControllers();
             int count = Math.Max(1, maxLinesPerFrame);
+            int processedThisFrame = 0;
             for (int i = 0; i < count; ++i)
             {
                 Packet packet;
@@ -151,7 +201,22 @@ namespace Ibit.Core.Serial
                 {
                     if (inbound.Count == 0) break;
                     packet = inbound.Dequeue();
+                    processedThisFrame++;
                     if (packet.Kind == PacketKind.Line) pendingLines--;
+                }
+                int lineLagMs = 0;
+                if (packet.Kind == PacketKind.Line)
+                {
+                    int lagMs = unchecked(Environment.TickCount - packet.EnqueuedTick);
+                    lineLagMs = lagMs >= 0 ? lagMs : 0;
+                    if (lagMs >= 0)
+                    {
+                        if (lagMs > peakQueueLagMs)
+                            Interlocked.Exchange(ref peakQueueLagMs, lagMs);
+                        if (lagMs > peakIntervalQueueLagMs)
+                            peakIntervalQueueLagMs = lagMs;
+                    }
+                    Interlocked.Increment(ref dispatchedLinesTotal);
                 }
 
                 switch (packet.Kind)
@@ -171,17 +236,74 @@ namespace Ibit.Core.Serial
                         Debug.LogWarning("[PITACO Manager] Conexao perdida. Redescobrindo COM...");
                         break;
                     case PacketKind.Line:
-                        if (activeVersion == Version.Pitaco24 && modern != null)
-                            modern.ManagedLine(packet.Text);
-                        if (legacy != null &&
-                            (activeVersion == Version.Pitaco20 || IsNumericPressure(packet.Text)))
-                            legacy.ManagedLine(packet.Text);
+                        // The coordinator and Bridge consume this value
+                        // synchronously while the JSON line is dispatched.
+                        currentDispatchQueueLagMs = lineLagMs;
+                        currentDispatchArrivalTicks = packet.ArrivalMonotonicTicks;
+                        try
+                        {
+                            if (activeVersion == Version.Pitaco24 && modern != null)
+                                modern.ManagedLine(packet.Text);
+                            if (legacy != null &&
+                                (activeVersion == Version.Pitaco20 || IsNumericPressure(packet.Text)))
+                                legacy.ManagedLine(packet.Text);
+                        }
+                        finally
+                        {
+                            currentDispatchQueueLagMs = 0;
+                            currentDispatchArrivalTicks = 0;
+                        }
                         break;
                     case PacketKind.Warning:
                         Debug.LogWarning("[PITACO Manager] " + packet.Text);
                         break;
+                    case PacketKind.CommandTrace:
+                        // The USB worker reports this only AFTER port.Write.
+                        Debug.Log("[PITACO-CMD] " + packet.Text +
+                            " | workerTickMs=" + packet.EnqueuedTick +
+                            " | dispatchDelayMs=" +
+                            Math.Max(0, unchecked(Environment.TickCount - packet.EnqueuedTick)));
+                        break;
                 }
             }
+            if (processedThisFrame == count && PendingLines > 0)
+                Interlocked.Increment(ref queueBudgetExhaustions);
+
+            int dispatchWorkMs = unchecked(Environment.TickCount - frameStartTick);
+            if (dispatchWorkMs >= 0 && dispatchWorkMs > peakDispatchWorkMs)
+                peakDispatchWorkMs = dispatchWorkMs;
+            TraceQueueThroughput(frameStartTick);
+        }
+
+        private void TraceQueueThroughput(int nowTick)
+        {
+            int elapsedMs = unchecked(nowTick - diagnosticStartTick);
+            if (elapsedMs < QueueDiagnosticIntervalMs || elapsedMs < 0) return;
+            diagnosticStartTick = nowTick;
+            long enqueuedNow = Interlocked.Read(ref enqueuedLinesTotal);
+            long dispatchedNow = Interlocked.Read(ref dispatchedLinesTotal);
+            long droppedNow = Interlocked.Read(ref droppedLines);
+            long intervalIn = enqueuedNow - loggedEnqueuedLines;
+            long intervalOut = dispatchedNow - loggedDispatchedLines;
+            long intervalDropped = droppedNow - loggedDroppedLines;
+            loggedEnqueuedLines = enqueuedNow;
+            loggedDispatchedLines = dispatchedNow;
+            loggedDroppedLines = droppedNow;
+            int pending = PendingLines;
+            Debug.Log("[PITACO-QUEUE] intervalMs=" + elapsedMs +
+                " | in=" + intervalIn + " | out=" + intervalOut +
+                " | inHz=" + (intervalIn * 1000.0 / elapsedMs).ToString("F1", CultureInfo.InvariantCulture) +
+                " | outHz=" + (intervalOut * 1000.0 / elapsedMs).ToString("F1", CultureInfo.InvariantCulture) +
+                " | dropped=" + intervalDropped + " | pending=" + pending +
+                " | peakPending=" + PeakPendingLines +
+                " | maxWaitMs=" + peakIntervalQueueLagMs +
+                " | maxFrameGapMs=" + peakUpdateGapMs +
+                " | maxDispatchWorkMs=" + peakDispatchWorkMs +
+                " | budgetExhaustionsTotal=" + QueueBudgetExhaustions +
+                " | droppedTotal=" + droppedNow);
+            peakIntervalQueueLagMs = 0;
+            peakUpdateGapMs = 0;
+            peakDispatchWorkMs = 0;
         }
 
         private static bool IsNumericPressure(string line)
@@ -195,6 +317,9 @@ namespace Ibit.Core.Serial
 
         private void Push(PacketKind kind, Version version, string text)
         {
+            // Capture once in the worker immediately after ReadLine, before
+            // acquiring the queue lock. No wall-clock / UTC dependency.
+            long arrivalTicks = Stopwatch.GetTimestamp();
             lock (inboundLock)
             {
                 if (kind == PacketKind.Line)
@@ -205,8 +330,13 @@ namespace Ibit.Core.Serial
                         return;
                     }
                     pendingLines++;
+                    Interlocked.Increment(ref enqueuedLinesTotal);
+                    if (pendingLines > peakPendingLines)
+                        peakPendingLines = pendingLines;
                 }
-                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text });
+                inbound.Enqueue(new Packet { Kind = kind, DeviceVersion = version, Text = text,
+                    EnqueuedTick = Environment.TickCount,
+                    ArrivalMonotonicTicks = arrivalTicks });
             }
         }
 
@@ -222,6 +352,8 @@ namespace Ibit.Core.Serial
                 }
                 // Firmware interpreta caracteres individuais; nunca acrescentar LF.
                 port.Write(command);
+                Push(PacketKind.CommandTrace, Version.Pitaco24,
+                    "phase=SENT | command=" + command + " | port=" + port.PortName);
             }
         }
 
@@ -255,6 +387,9 @@ namespace Ibit.Core.Serial
             port.DiscardInBuffer();
             bool is24 = version == Version.Pitaco24;
             port.Write(is24 ? "i" : "e");
+            Push(PacketKind.CommandTrace, version,
+                "phase=IDENTIFY_SENT | command=" + (is24 ? "i" : "e") +
+                " | port=" + port.PortName);
             return WaitFor(port, is24 ? "echo2.4p" : "echop", handshakeTimeoutMs);
         }
 
@@ -333,7 +468,13 @@ namespace Ibit.Core.Serial
                             finally
                             {
                                 // Encerra a amostragem somente ao finalizar a sessao fisica.
-                                try { port.Write("f"); } catch (Exception) { }
+                                try
+                                {
+                                    port.Write("f");
+                                    Push(PacketKind.CommandTrace, found,
+                                        "phase=SHUTDOWN_SENT | command=f | port=" + portName);
+                                }
+                                catch (Exception) { }
                             }
                         }
                     }

@@ -92,7 +92,7 @@ namespace Ibit.WaterGame
                 pitaco24PpgCoordinator = manager.GetComponent<PpgProcessingCoordinator>();
 
             var measurement = pitaco24PpgCoordinator != null
-                ? pitaco24PpgCoordinator.LastMeasurement : null;
+                ? pitaco24PpgCoordinator.HudMeasurement : null;
 
             if (pitaco24PpgCoordinator == null ||
                 !pitaco24PpgCoordinator.OpticalContactConfirmed ||

@@ -22,9 +22,12 @@ namespace Ibit.Core.Oximetry.UI
         private PpgProcessingCoordinator coordinator;
         private SerialControllerPitaco24 serial;
         private FingerPlacementMonitor placement;
+        private string lastRenderState;
+        private float nextRenderDiagnosticAt;
 
-        // Retain current scene Player semantics; no second publication clock.
-        // Numeric values are already refreshed every 1 s by the Player.
+        // Only legacy oximeter uses the per-scene Player text. PITACO 2.4 HUD
+        // reads coordinator measurements directly, avoiding a second 1s cache.
+        // Mixer continues to use the separate source-aware Bridge.
         protected abstract string ReadPlayerText(bool pitaco24Connected);
 
         protected virtual void Update()
@@ -40,8 +43,8 @@ namespace Ibit.Core.Oximetry.UI
 
             if (!isPitaco24)
             {
-                // The old independent oximeter still owns its original HUD path.
-                SetText(ReadPlayerText(false) ?? string.Empty);
+                // Preserve the independent legacy oximeter's existing HUD.
+                SetText(ReadPlayerText(false) ?? string.Empty, "LEGACY");
                 return;
             }
 
@@ -53,44 +56,140 @@ namespace Ibit.Core.Oximetry.UI
                 placement = manager.GetComponent<FingerPlacementMonitor>();
             }
 
+            // The existing scene Text fits only about three lines. Keep the
+            // status and both measurements visible in every state, rather than
+            // appending diagnostics after a long table outside the text bounds.
             if (coordinator == null)
             {
-                SetText(ConnectedPrefix + "PPG: processamento ausente");
+                SetText(FormatPitaco24Compact("sem PPG", null, null),
+                    "NO_COORDINATOR");
                 return;
             }
 
             if (coordinator.JsonCallbacksReceived == 0)
             {
-                SetText(ConnectedPrefix + (serial != null && serial.JsonMessagesReceived > 0
-                    ? "PPG: JSON nao encaminhado"
-                    : "PPG: aguardando JSON"));
+                string label = serial != null && serial.JsonMessagesReceived > 0
+                    ? "erro JSON" : "aguardando JSON";
+                SetText(FormatPitaco24Compact(label, null, null), "WAIT_JSON");
                 return;
             }
 
             if (coordinator.ReceivedSampleFrames == 0)
             {
-                SetText(ConnectedPrefix + "PPG: JSON sem amostras RED/IR");
+                SetText(FormatPitaco24Compact("aguardando PPG", null, null),
+                    "WAIT_SAMPLES");
                 return;
             }
 
-            // The coordinator alone authorizes estimates. PlacementState only
-            // selects an informative message when that coordinator has no contact.
             if (!coordinator.OpticalContactConfirmed)
             {
-                SetText(FormatNoContactStatus(placement != null && placement.SessionActive
-                    ? placement.State
-                    : FingerPlacementState.WaitingForData));
+                FingerPlacementState state = placement != null &&
+                    placement.SessionActive
+                        ? placement.State : FingerPlacementState.WaitingForData;
+                string label;
+                switch (state)
+                {
+                    case FingerPlacementState.Warning:
+                    case FingerPlacementState.Critical:
+                    case FingerPlacementState.PauseRequired:
+                        label = "reposicione dedo";
+                        break;
+                    case FingerPlacementState.Recovering:
+                        label = "estabilizando";
+                        break;
+                    case FingerPlacementState.TelemetryLost:
+                        label = "sem telemetria";
+                        break;
+                    case FingerPlacementState.DeviceDisconnected:
+                        label = "sem conexao";
+                        break;
+                    default:
+                        label = "sem contato";
+                        break;
+                }
+                SetText(FormatPitaco24Compact(label, null, null), "NO_CONTACT");
                 return;
             }
 
-            string playerText = ReadPlayerText(true);
-            SetText(playerText ?? ConnectedPrefix + "PPG: aguardando Player");
+            if (!coordinator.Gate01Approved)
+            {
+                string label = coordinator.Gate01Status == "Failed"
+                    ? "G1 reprovado" : "aguardando G1";
+                SetText(FormatPitaco24Compact(label, null, null), "G1_BLOCK");
+                return;
+            }
+
+            if (coordinator.HudHoldingShortContactGap)
+            {
+                // Held values are marked *, never presented as current.
+                // The Mixer uses LastMeasurement, not HudMeasurement.
+                var held = coordinator.HudMeasurement;
+                SetText(FormatPitaco24Compact("contato instavel",
+                    held.BpmEstimate, held.SpO2DemoPercent, true, true),
+                    "HOLD_VISUAL_ONLY");
+                return;
+            }
+
+            if (coordinator.HudHoldingRejectedBpm)
+            {
+                var latest = coordinator.HudMeasurement;
+                SetText(FormatPitaco24Compact("BPM reavaliando",
+                    coordinator.HudRetainedBpmVisualOnly,
+                    latest != null ? latest.SpO2DemoPercent : null,
+                    true, false), "BPM_HOLD_VISUAL_ONLY");
+                return;
+            }
+
+            if (!coordinator.HudHasRecentLiveMeasurement)
+            {
+                SetText(FormatPitaco24Compact("aguardando BPM/O2", null, null),
+                    "WAIT_ESTIMATE");
+                return;
+            }
+
+            var live = coordinator.HudMeasurement;
+            SetText(FormatPitaco24Compact("conectado",
+                live.BpmEstimate, live.SpO2DemoPercent), "LIVE");
         }
 
-        private void SetText(string value)
+        private void SetText(string value, string state)
         {
             if (hud.text != value)
                 hud.text = value;
+            // Visual proof, distinct from Bridge/Mixer consumption. Transitions
+            // are logged immediately; unchanged state is sampled every 10 s.
+            if (lastRenderState != state ||
+                Time.unscaledTime >= nextRenderDiagnosticAt)
+            {
+                lastRenderState = state;
+                nextRenderDiagnosticAt = Time.unscaledTime + 10f;
+                var measurement = coordinator != null ? coordinator.HudMeasurement : null;
+                Debug.Log("[PPG-HUD] t=" + Time.unscaledTime.ToString("F2") +
+                    " | scene=" + gameObject.scene.name +
+                    " | object=" + gameObject.name +
+                    " | frame=" + Time.frameCount +
+                    " | state=" + state +
+                    " | contact=" + (coordinator != null && coordinator.OpticalContactConfirmed) +
+                    " | g1=" + (coordinator != null ? coordinator.Gate01Status : "none") +
+                    " | bpmRejectStreak=" +
+                    (coordinator != null ? coordinator.ConsecutiveBpmRejections : 0) +
+                    " | bpmThreshold=" +
+                    (coordinator != null
+                        ? coordinator.ActiveBpmAutocorrelationThreshold.ToString("F2")
+                        : "--") +
+                    " | bpmHeldVisualOnly=" +
+                    (coordinator != null && coordinator.HudHoldingRejectedBpm) +
+                    " | bpmHeldValue=" +
+                    (coordinator != null && coordinator.HudRetainedBpmVisualOnly.HasValue
+                        ? coordinator.HudRetainedBpmVisualOnly.Value.ToString("F1") : "--") +
+                    " | candidateBpm=" +
+                    (measurement != null && measurement.BpmEstimate.HasValue
+                        ? measurement.BpmEstimate.Value.ToString("F1") : "--") +
+                    " | candidateSpO2Demo=" +
+                    (measurement != null && measurement.SpO2DemoPercent.HasValue
+                        ? measurement.SpO2DemoPercent.Value.ToString("F1") : "--") +
+                    " | rendered=" + (value ?? string.Empty).Replace("\n", " / "));
+            }
         }
 
         public static string FormatNoContactStatus(FingerPlacementState state)
@@ -110,6 +209,40 @@ namespace Ibit.Core.Oximetry.UI
                 default:
                     return ConnectedPrefix + "PPG: sem contato optico";
             }
+        }
+
+        // Exactly three visible lines in the existing StatusDevices Text:
+        // connection/state, BPM (current | approved rolling 60s mean), and
+        // SpO2 DEMO (current | approved rolling 60s mean).
+        // The means are historical and never substitute a missing live reading.
+        private string FormatPitaco24Compact(string state, double? bpm,
+            double? spo2Demo, bool heldBpm = false, bool heldSpo2 = false)
+        {
+            double? bpmMean = null, spo2Mean = null;
+            int bpmCount = 0, spo2Count = 0;
+            if (coordinator != null)
+                coordinator.GetHudTrend60Seconds(
+                    out bpmMean, out bpmCount, out spo2Mean, out spo2Count);
+
+            string currentBpm = FormatHudValue(bpm) +
+                (heldBpm && bpm.HasValue ? "*" : "");
+            string currentSpo2 = spo2Demo.HasValue
+                ? FormatHudValue(spo2Demo) + "%" + (heldSpo2 ? "*" : "")
+                : "--";
+            string meanSpo2 = spo2Mean.HasValue
+                ? FormatHudValue(spo2Mean) + "%" : "--";
+
+            return "PITACO 2.4: " + state + "\n" +
+                "BPM atual: " + currentBpm + " | 60s: " +
+                FormatHudValue(bpmMean) + "\n" +
+                "O2 DEMO: " + currentSpo2 + " | 60s: " + meanSpo2;
+        }
+
+        private static string FormatHudValue(double? value)
+        {
+            return value.HasValue
+                ? value.Value.ToString("F1", CultureInfo.InvariantCulture)
+                : "--";
         }
 
         public static string FormatPitaco24Values(double? bpm, double? spo2Demo)

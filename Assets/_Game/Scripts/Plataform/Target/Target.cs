@@ -10,6 +10,11 @@ namespace Ibit.Plataform
     public partial class Target : MonoBehaviour
     {
         [SerializeField] private ObjectModel _model;
+        // Cached event owners allow cleanup when this Target is destroyed.
+        // Without it, DeepDDA still invokes handlers on destroyed targets
+        // and Unity emits a costly warning/stacktrace on every adjustment.
+        private Spawner subscribedSpawner;
+        private DeepDDAManager subscribedDeepDda;
 
         public float Score { get; private set; }
 
@@ -23,9 +28,18 @@ namespace Ibit.Plataform
             _model = model;
             CalculateHeight();
             CalculateScore();
-            FindObjectOfType<Spawner>().OnUpdatedPerformanceTarget += OnUpdatedPerformance;   
-            FindObjectOfType<DeepDDAManager>().OnUpdatedPerformanceTarget += OnUpdatedPerformance;    
-            FindObjectOfType<DeepDDAManager>().OnUpdatedPerformanceLevel += OnUpdatedPerformance;        
+            // Build can be called again: keep exactly one subscription per
+            // event, then unsubscribe from the SAME instances on destroy.
+            UnsubscribeFromPerformanceEvents();
+            subscribedSpawner = FindObjectOfType<Spawner>();
+            subscribedDeepDda = FindObjectOfType<DeepDDAManager>();
+            if (subscribedSpawner != null)
+                subscribedSpawner.OnUpdatedPerformanceTarget += OnUpdatedPerformance;
+            if (subscribedDeepDda != null)
+            {
+                subscribedDeepDda.OnUpdatedPerformanceTarget += OnUpdatedPerformance;
+                subscribedDeepDda.OnUpdatedPerformanceLevel += OnUpdatedPerformance;
+            }
         }
 
         public void OnUpdatedPerformance(float insAcc, float expAcc)
@@ -118,11 +132,22 @@ namespace Ibit.Plataform
             this.transform.position = tmpPos;
         }
 
+        private void UnsubscribeFromPerformanceEvents()
+        {
+            if (subscribedSpawner != null)
+                subscribedSpawner.OnUpdatedPerformanceTarget -= OnUpdatedPerformance;
+            if (subscribedDeepDda != null)
+            {
+                subscribedDeepDda.OnUpdatedPerformanceTarget -= OnUpdatedPerformance;
+                subscribedDeepDda.OnUpdatedPerformanceLevel -= OnUpdatedPerformance;
+            }
+            subscribedSpawner = null;
+            subscribedDeepDda = null;
+        }
+
         private void OnDestroy()
         {
-            var spwn = FindObjectOfType<Spawner>();
-            if (spwn != null)
-                spwn.OnUpdatedPerformanceTarget -= OnUpdatedPerformance;
+            UnsubscribeFromPerformanceEvents();
         }
     }
 }

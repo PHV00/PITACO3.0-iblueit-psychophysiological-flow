@@ -25,6 +25,9 @@ using UnityEditor;
 
 public class DeepDDAAgent : Agent
 {
+    // Diagnostic PPG branch: suppress repetitive action narration only.
+    // Keep all actions, rewards and warnings unchanged.
+    private static readonly bool LogVerboseDdaActions = false;
     public static DeepDDAAgent instance;
     [SerializeField] private StageManager stage;
     [SerializeField] private Scorer scr;
@@ -229,21 +232,18 @@ public class DeepDDAAgent : Agent
         sensor.AddObservation(FiniteObservation(performanceDelta, "performanceDelta"));
         sensor.AddObservation(FiniteObservation(episodePerformanceDelta, "episodePerformanceDelta"));
 
-        // Observa CG - pico e duração.
-        if (sessionSucceeded == 0)
+        // Preserve the existing 16-observation ONNX contract in all states.
+        // Session transitions cannot silently drop the final four elements.
+        if (sessionSucceeded == 0 && Pacient.Loaded != null)
         {
-            if (Pacient.Loaded != null)
-            {
-                sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsPeakFlow * GameManager.CapacityMultiplierPlataform, "pico inspiratorio"));
-                sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpPeakFlow * GameManager.CapacityMultiplierPlataform, "pico expiratorio"));
-                sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao inspiratoria"));
-                sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao expiratoria"));
-            }
-            else
-            {
-                // Avoid teardown NRE without reducing the observations count.
-                for (int i = 0; i < 4; i++) sensor.AddObservation(0f);
-            }
+            sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsPeakFlow * GameManager.CapacityMultiplierPlataform, "pico inspiratorio"));
+            sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpPeakFlow * GameManager.CapacityMultiplierPlataform, "pico expiratorio"));
+            sensor.AddObservation(FiniteObservation(-Pacient.Loaded.CapacitiesPitaco.InsFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao inspiratoria"));
+            sensor.AddObservation(FiniteObservation(Pacient.Loaded.CapacitiesPitaco.ExpFlowDuration * GameManager.CapacityMultiplierPlataform, "duracao expiratoria"));
+        }
+        else
+        {
+            for (int i = 0; i < 4; i++) sensor.AddObservation(0f);
         }
     }
 
@@ -640,7 +640,7 @@ public class DeepDDAAgent : Agent
             if(adjustSpeed != 0)
             {
                 AddReward(-0.5f / (StageModel.Loaded.Loops * 10));
-                Debug.Log("Velocidade: Manter a velocidade do treino.");
+                if (LogVerboseDdaActions) Debug.Log("Velocidade: Manter a velocidade do treino.");
             }
             break;
         
@@ -652,7 +652,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 2)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais fácil evitando a frustração
-                    Debug.Log("Velocidade: Diminuir a velocidade do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Velocidade: Diminuir a velocidade do treino.");
                 // }
                 // else
                 // {
@@ -671,7 +671,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 0)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais desafiador evitando o tédio
-                    Debug.Log("Velocidade: Aumentar a velocidade do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Velocidade: Aumentar a velocidade do treino.");
                 // }
                 // else
                 // {
@@ -695,7 +695,7 @@ public class DeepDDAAgent : Agent
                 || episodePerformanceDelta < -0.1)
             {
                 AddReward(-0.5f / (StageModel.Loaded.Loops * 10));
-                Debug.Log("Carga: Manter a carga do treino.");
+                if (LogVerboseDdaActions) Debug.Log("Carga: Manter a carga do treino.");
             }
             break;
 
@@ -707,7 +707,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 2)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais fácil evitando a frustração
-                    Debug.Log("Carga: Diminuir a carga do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Carga: Diminuir a carga do treino.");
                 // }
                 // else
                 // {
@@ -739,7 +739,7 @@ public class DeepDDAAgent : Agent
                 // if (flowState == 0)
                 // {
                     AddReward(1.2f); // Recompensa por tornar o jogo mais desafiador
-                    Debug.Log("Carga: Aumentar a carga do treino.");
+                    if (LogVerboseDdaActions) Debug.Log("Carga: Aumentar a carga do treino.");
                 // }
                 // else
                 // {

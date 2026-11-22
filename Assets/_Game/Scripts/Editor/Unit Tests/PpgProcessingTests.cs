@@ -42,6 +42,69 @@ public class PpgProcessingTests
     }
 
     [Test]
+    public void DetailedEstimatorDiagnosticsPreserveSuccessfulEstimates()
+    {
+        PpgProcessedWindow processed;
+        string reason;
+        Assert.IsTrue(PpgSignalProcessor.TryProcess(MakeWave(75),
+            out processed, out reason), reason);
+
+        double bpmOriginal, corrOriginal, bpmDetailed, corrDetailed, lag;
+        string bpmReason;
+        Assert.IsTrue(BpmEstimator.TryEstimate(processed, out bpmOriginal,
+            out corrOriginal));
+        Assert.IsTrue(BpmEstimator.TryEstimateDetailed(processed,
+            out bpmDetailed, out corrDetailed, out lag, out bpmReason));
+        Assert.AreEqual("OK", bpmReason);
+        Assert.Greater(lag, 0);
+        Assert.AreEqual(bpmOriginal, bpmDetailed, 1e-9);
+        Assert.AreEqual(corrOriginal, corrDetailed, 1e-9);
+
+        double spoOriginal, rOriginal, spoDetailed, rDetailed;
+        string spoReason;
+        Assert.IsTrue(Spo2Estimator.TryEstimateDemo(processed,
+            out spoOriginal, out rOriginal));
+        Assert.IsTrue(Spo2Estimator.TryEstimateDemoDetailed(processed,
+            out spoDetailed, out rDetailed, out spoReason));
+        Assert.AreEqual("OK", spoReason);
+        Assert.AreEqual(spoOriginal, spoDetailed, 1e-9);
+        Assert.AreEqual(rOriginal, rDetailed, 1e-9);
+    }
+
+    [Test]
+    public void DetailedEstimatorDiagnosticsExplainNullMeasurements()
+    {
+        var constant = new List<PpgSample>();
+        for (int i = 0; i < 210; i++)
+            constant.Add(new PpgSample((ushort)i, (uint)(i * 40),
+                60000, 80000));
+        PpgProcessedWindow processed;
+        string reason;
+        Assert.IsTrue(PpgSignalProcessor.TryProcess(constant,
+            out processed, out reason), reason);
+        double bpm, corr, lag, spo, ratio;
+        string bpmReason, spoReason;
+        Assert.IsFalse(BpmEstimator.TryEstimateDetailed(processed,
+            out bpm, out corr, out lag, out bpmReason));
+        Assert.AreEqual("AUTOCORR_BELOW_0_57", bpmReason);
+        Assert.IsFalse(Spo2Estimator.TryEstimateDemoDetailed(processed,
+            out spo, out ratio, out spoReason));
+        Assert.AreEqual("AC_RMS_TOO_LOW", spoReason);
+
+        var withContactGap = MakeWave(75);
+        withContactGap.RemoveAt(140);
+        var s = withContactGap[140];
+        withContactGap[140] = new PpgSample(s.Sequence, s.TimeMs,
+            s.Red, s.Ir, 1);
+        Assert.IsTrue(PpgSignalProcessor.TryProcess(withContactGap,
+            out processed, out reason), reason);
+        Assert.AreEqual(1, processed.ReconstructedSamples);
+        Assert.IsFalse(Spo2Estimator.TryEstimateDemoDetailed(processed,
+            out spo, out ratio, out spoReason));
+        Assert.AreEqual("RECONSTRUCTED_PPG_GAP", spoReason);
+    }
+
+    [Test]
     public void RepeatedFifoReadTimestampsDoNotInvalidateSequentialSamples()
     {
         PpgProcessedWindow processed;
@@ -224,8 +287,10 @@ public class PpgProcessingTests
             Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue);
             Assert.IsTrue(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
 
-            // The first two contact failures quarantine the raw samples:
-            // they suspend old numbers but preserve G1 and the 8-second buffer.
+            // The first two contact failures quarantine raw samples.
+            // LastMeasurement stays unavailable to the Mixer, but the
+            // short-gap HUD view retains only the previous real reading.
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
             for (int i = 420; i < 422; i++)
             {
                 receive.Invoke(coordinator, new object[]
@@ -239,7 +304,19 @@ public class PpgProcessingTests
                 Assert.AreEqual("Passed", coordinator.Gate01Status);
                 Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
                 Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+                Assert.IsTrue(coordinator.HudHoldingShortContactGap);
+                Assert.IsTrue(coordinator.HudMeasurement.BpmEstimate.HasValue);
+                Assert.IsTrue(coordinator.HudMeasurement.SpO2DemoPercent.HasValue);
             }
+
+            // A held HUD number has a 2-second freshness cap even if contact
+            // confirmation and the G1 PASS have not changed.
+            var lastHudTime = typeof(PpgProcessingCoordinator).GetField(
+                "lastHudValidAt", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(lastHudTime);
+            lastHudTime.SetValue(coordinator, Time.unscaledTime - 3f);
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
+            Assert.IsFalse(coordinator.HudMeasurement.BpmEstimate.HasValue);
 
             // Third consecutive failure confirms removal and clears the window.
             receive.Invoke(coordinator, new object[]
@@ -252,12 +329,47 @@ public class PpgProcessingTests
             Assert.AreEqual("Waiting", coordinator.Gate01Status);
             Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
             Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
+            Assert.IsFalse(coordinator.HudMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.HudMeasurement.SpO2DemoPercent.HasValue);
             Assert.AreEqual(423, contactEvents);
         }
         finally
         {
             UnityEngine.Object.DestroyImmediate(gameObject);
         }
+    }
+
+    [Test]
+    public void FailedG1AlsoRevokesHudShortContactHoldImmediately()
+    {
+        var gameObject = new GameObject("PPG short-gap HUD G1 failure test");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 250; i++)
+            {
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+                if (i == 125)
+                    ReceiveG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0));
+            }
+
+            Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(250, false));
+            Assert.IsTrue(coordinator.HudHoldingShortContactGap);
+            Assert.IsTrue(coordinator.HudMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+
+            // The next G1 decision is a failure while still in the
+            // two-sample grace period: previous display data is revoked.
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, false, 4));
+            Assert.AreEqual("Failed", coordinator.Gate01Status);
+            Assert.IsFalse(coordinator.HudHoldingShortContactGap);
+            Assert.IsFalse(coordinator.HudMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
     }
 
     // Gate 01 is calculated by the ESP32; the Unity coordinator only accepts
@@ -289,6 +401,96 @@ public class PpgProcessingTests
             ",\"ppg\":{\"red\":" + red + ",\"ir\":" + ir +
             "},\"sqi\":{\"g1\":null,\"reason\":" + reason +
             ",\"contact\":" + (contact ? "true" : "false") + "}}";
+    }
+
+    [Test]
+    public void UnityDiagnosesOriginalG1JsonWithoutChangingFirmwareVerdict()
+    {
+        var gameObject = new GameObject("G1 original firmware JSON test");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 125; i++)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+            // Important: original firmware frame has NO optional stats object.
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(5000, false, 4));
+            Assert.AreEqual("Failed", coordinator.Gate01Status);
+            Assert.AreEqual(4, coordinator.LastGate01Reason);
+            Assert.AreEqual(125, coordinator.LastGate01Samples);
+            var observed = coordinator.LastG1ShadowSummary;
+            Assert.IsNotNull(observed);
+            Assert.AreEqual(125, observed.FirmwareReportedSamples);
+            Assert.AreEqual(125, observed.ObservedSamples);
+            Assert.IsTrue(observed.CountAndSequenceCovered);
+            Assert.Greater(observed.RedRange, 500,
+                "Locally adequate amplitude MUST NOT override firmware reason=4.");
+
+            for (int i = 125; i < 250; i++)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, true, 0));
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+            Assert.AreEqual(0, coordinator.LastGate01Reason);
+            Assert.AreEqual(125, coordinator.LastG1ShadowSummary.ObservedSamples);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void UnityShadowProbeShows477AdcRangeWithoutChangingG1Limit()
+    {
+        var probe = new PpgRawG1Probe();
+        for (int i = 0; i < 125; ++i)
+            probe.Observe(i, i * 40, 100000 + (i % 2) * 477,
+                120000 + (i % 2) * 820, true);
+        PpgRawG1Summary stats = probe.Summarize(5000, 125);
+        Assert.IsTrue(stats.CountAndSequenceCovered);
+        Assert.AreEqual(125, stats.ObservedSamples);
+        Assert.AreEqual(477, stats.RedRange);
+        Assert.AreEqual(820, stats.IrRange);
+        Assert.AreEqual(100000, stats.RedMin);
+        Assert.AreEqual(100477, stats.RedMax);
+        Assert.AreEqual(0, stats.ContactFalse);
+        Assert.AreEqual(0, stats.RedClips);
+        Assert.AreEqual(0, stats.IrClips);
+        StringAssert.Contains("UNITY_RAW_SHADOW_NOT_FIRMWARE",
+            stats.ToDiagnosticString());
+        StringAssert.Contains("redRange=477", stats.ToDiagnosticString());
+        // Diagnostic only: firmware's threshold remains unchanged at 500 ADC.
+    }
+
+    [Test]
+    public void UnityShadowProbeMakesMissingRawFramesExplicit()
+    {
+        var probe = new PpgRawG1Probe();
+        for (int i = 0; i < 125; ++i)
+        {
+            if (i == 60) continue; // a dropped JSON frame, not contact loss
+            probe.Observe(i, i * 40, 100000 + (i % 2) * 477,
+                120000 + (i % 2) * 820, true);
+        }
+        PpgRawG1Summary stats = probe.Summarize(5000, 125);
+        Assert.AreEqual(124, stats.ObservedSamples);
+        Assert.IsFalse(stats.CountAndSequenceCovered);
+        Assert.AreEqual(1, stats.SequenceGaps);
+        StringAssert.Contains("match=INCOMPLETE", stats.ToDiagnosticString());
+    }
+
+    [Test]
+    public void UnityShadowProbeSelectsLastFirmwareReportedSampleCount()
+    {
+        var probe = new PpgRawG1Probe();
+        for (int i = 0; i < 250; ++i)
+        {
+            int redAmplitude = i < 125 ? 2000 : 477;
+            probe.Observe(i, i * 40, 100000 + (i % 2) * redAmplitude,
+                120000 + (i % 2) * 820, true);
+        }
+        PpgRawG1Summary stats = probe.Summarize(10000, 125);
+        Assert.AreEqual(125, stats.ObservedSamples);
+        Assert.AreEqual(477, stats.RedRange);
+        Assert.AreEqual(0, stats.SequenceGaps);
+        probe.Clear();
+        Assert.IsTrue(probe.Summarize(10000, 125).Empty);
     }
 
     [Test]
@@ -416,6 +618,137 @@ public class PpgProcessingTests
             ReceiveG1TestJson(coordinator, MakeGate01TestSample(129, false, 10));
             Assert.AreEqual("Waiting", coordinator.Gate01Status);
             Assert.IsFalse(coordinator.OpticalContactConfirmed);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void ContactFalseOpticalFramesRefreshTelemetryHeartbeat()
+    {
+        var gameObject = new GameObject("PPG raw telemetry clock");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            var clockField = typeof(PpgProcessingCoordinator).GetField(
+                "lastSampleReceivedAt", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(clockField);
+            // Make the previous heartbeat stale. A frame with contact=false
+            // still demonstrates that the serial PPG stream is alive.
+            clockField.SetValue(coordinator, Time.unscaledTime - 4f);
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(0, false, 10));
+            float refreshed = (float)clockField.GetValue(coordinator);
+            Assert.GreaterOrEqual(refreshed, 0f);
+            Assert.That(Time.unscaledTime - refreshed, Is.LessThan(1f));
+
+            var update = typeof(PpgProcessingCoordinator).GetMethod(
+                "Update", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(update);
+            update.Invoke(coordinator, null);
+            Assert.AreNotEqual("Sem amostras PPG recentes",
+                coordinator.LastMeasurement.Status);
+            Assert.IsFalse(coordinator.OpticalContactConfirmed);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void ReasonOneRevokesG1OnlyOnceAndAccumulatesNewCandidateSamples()
+    {
+        var gameObject = new GameObject("PPG reset only once");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i <= 125; ++i)
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(5000, true, 0));
+            Assert.AreEqual("Passed", coordinator.Gate01Status);
+
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(126, true, 1));
+            Assert.AreEqual("Waiting", coordinator.Gate01Status);
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            var buffer = (PpgSampleBuffer)field.GetValue(coordinator);
+            Assert.AreEqual(1, buffer.Count,
+                "The old eligible window must be discarded on firmware reset.");
+
+            // The firmware is still waiting for its next G1. Repeated
+            // reason=1 must NOT clear a candidate buffer on every sample.
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(127, true, 1));
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(128, true, 1));
+            Assert.AreEqual("Waiting", coordinator.Gate01Status);
+            Assert.AreEqual(3, buffer.Count);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void StaleG1SeparatesOldWindowFromNewCandidateSamples()
+    {
+        var gameObject = new GameObject("PPG expired G1 isolation");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 210; ++i)
+            {
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+                if (i == 125)
+                    ReceiveG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0));
+            }
+            Assert.IsTrue(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            var buffer = (PpgSampleBuffer)field.GetValue(coordinator);
+            Assert.Greater(buffer.Count, 200);
+
+            // Device time is >6.5s after the last PASS; no Unity wall-clock
+            // manipulation is needed to force this expiry deterministically.
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(300, true, 0));
+            Assert.AreEqual("Stale", coordinator.Gate01Status);
+            Assert.AreEqual(1, buffer.Count);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
+            Assert.IsNotNull(coordinator.LastG1ShadowSummary,
+                "RAW diagnostic history is independent of the eligible buffer.");
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(301, true, 0));
+            Assert.AreEqual(2, buffer.Count);
+            Assert.AreEqual("Stale", coordinator.Gate01Status);
+        }
+        finally { UnityEngine.Object.DestroyImmediate(gameObject); }
+    }
+
+    [Test]
+    public void FailedG1DiscardsPreviousWindowButRetainsFutureCandidates()
+    {
+        var gameObject = new GameObject("PPG explicit failure boundaries");
+        try
+        {
+            var coordinator = gameObject.AddComponent<PpgProcessingCoordinator>();
+            for (int i = 0; i < 250; ++i)
+            {
+                ReceiveG1TestJson(coordinator, MakeGate01TestSample(i, true));
+                if (i == 125)
+                    ReceiveG1TestJson(coordinator,
+                        MakeGate01TestJson(5000, true, 0));
+            }
+            var field = typeof(PpgProcessingCoordinator).GetField(
+                "buffer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNotNull(field);
+            var buffer = (PpgSampleBuffer)field.GetValue(coordinator);
+            Assert.Greater(buffer.Count, 200);
+            ReceiveG1TestJson(coordinator, MakeGate01TestJson(10000, false, 4));
+            Assert.AreEqual("Failed", coordinator.Gate01Status);
+            Assert.AreEqual(0, buffer.Count);
+            Assert.IsNotNull(coordinator.LastG1ShadowSummary);
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(250, true, 4));
+            ReceiveG1TestJson(coordinator, MakeGate01TestSample(251, true, 4));
+            Assert.AreEqual(2, buffer.Count);
+            Assert.AreEqual((ushort)250, buffer.Samples[0].Sequence);
+            Assert.IsFalse(coordinator.LastMeasurement.BpmEstimate.HasValue);
+            Assert.IsFalse(coordinator.LastMeasurement.SpO2DemoPercent.HasValue);
         }
         finally { UnityEngine.Object.DestroyImmediate(gameObject); }
     }
