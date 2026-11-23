@@ -1,5 +1,11 @@
 # PITACO 3.0 — fase 1: captura na Unity (sem alterações da IA)
 
+> **Registro histórico da fase 1.** A branch evoluiu para o teste E2E com
+> `Pitaco3BackendReady = true` e backend implantado. Para o procedimento
+> atual de conexão com Azure/Atlas, consulte `PITACO3_UNITY_END_TO_END.md`.
+> Os trechos abaixo sobre bloqueio de upload descrevem apenas a fase 1.
+
+
 Branch: **feature/pitaco3-unity-oximetry-persistence**, originada de **test/unity-ppg-monotonic-clock-alignment**.
 
 ## Escopo
