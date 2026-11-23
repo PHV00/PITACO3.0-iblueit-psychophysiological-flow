@@ -9,9 +9,10 @@ namespace Ibit.Core.Data.Manager
 {
     public sealed class DataManager
     {
-        // Phase 1 (Unity-only): preserve PITACO 3.0 JSON locally. Switch
-        // this only after the deployed backend accepts/validates all arrays.
-        public const bool Pitaco3BackendReady = false;
+        // PITACO 3.0 end-to-end TEST branch: backend schema deployed to Azure.
+        // Production rollout still requires confirmation of the Atlas unique index
+        // and an actual stage POST/GET; no clinical use of SpO2 DEMO.
+        public const bool Pitaco3BackendReady = true;
         public const string Pitaco3DeviceName = "Pitaco 3.0";
 
         public static DataManager Instance { get; } = new DataManager();
@@ -72,26 +73,55 @@ namespace Ibit.Core.Data.Manager
             bool locallySaved = LocalDataManager.Instance.SaveLocalData(
                 "PlataformOverview", plataform, Pacient.Loaded.Name);
             if (!locallySaved)
-                Debug.LogError("[PITACO3-RECORD] Falha ao salvar o JSON local da etapa.");
+                Debug.LogError("[PITACO3-E2E] Falha ao salvar JSON local da etapa.");
 
-            if (!ConfigurationManager.SendRemoteData || string.IsNullOrWhiteSpace(ConfigurationManager.GameApiToken))
-                return response;
-
-            // Existing production API rejects deviceName="Pitaco 3.0". Never
-            // lose the local capture or accidentally POST an unsupported DTO.
             bool hasPitaco3 = plataform.FlowDataDevices != null &&
                 plataform.FlowDataDevices.Exists(device =>
                     device != null && device.DeviceName == Pitaco3DeviceName);
+
+            if (!ConfigurationManager.SendRemoteData ||
+                string.IsNullOrWhiteSpace(ConfigurationManager.GameApiToken))
+            {
+                if (hasPitaco3)
+                    Debug.LogWarning("[PITACO3-E2E] Envio remoto desabilitado ou GameApiToken vazio. " +
+                        "Verifique gameSendRemoteData e gameApiToken. JSON local permanece salvo.");
+                return response;
+            }
+
             if (hasPitaco3 && !Pitaco3BackendReady)
             {
                 bool queued = LocalDataManager.Instance.SaveRemoteData(
                     "PlataformOverview", plataform, Pacient.Loaded.IdApi);
                 if (queued) response.LocalResponse = plataform;
-                else Debug.LogError("[PITACO3-RECORD] Falha ao preparar reenvio remoto.");
-                Debug.LogWarning("[PITACO3-RECORD] Upload suspenso ate a API aceitar o novo schema.");
+                else Debug.LogError("[PITACO3-E2E] Falha ao preparar pendencia remota.");
+                Debug.LogWarning("[PITACO3-E2E] API ainda nao liberada neste build.");
                 return response;
             }
 
+            if (hasPitaco3)
+            {
+                // For the E2E test, POST directly to our Azure API.
+                // A separate HTTP google.com probe could fail even when Azure
+                // is reachable, silently bypassing the test.
+                var api = await ApiClient.Instance.SavePlataformOverview(plataform);
+                if (api != null && api.Success)
+                {
+                    response.ApiResponse = api;
+                    Debug.Log("[PITACO3-E2E] REMOTE_OK run=" + plataform.ClientRunId +
+                              " | dados aceitos pela API. Conferir no Atlas.");
+                }
+                else
+                {
+                    bool queued = LocalDataManager.Instance.SaveRemoteData(
+                        "PlataformOverview", plataform, Pacient.Loaded.IdApi);
+                    if (queued) response.LocalResponse = plataform;
+                    Debug.LogError("[PITACO3-E2E] REMOTE_FAIL run=" + plataform.ClientRunId +
+                                   " | copia local mantida; pendencia=" + queued);
+                }
+                return response;
+            }
+
+            // The legacy devices retain the previous remote-save policy.
             var hasInternetConnection = await ApiClient.Instance.HasInternetConnection();
             if (!hasInternetConnection)
             {
@@ -101,7 +131,6 @@ namespace Ibit.Core.Data.Manager
             }
 
             response.ApiResponse = await ApiClient.Instance.SavePlataformOverview(plataform);
-
             return response;
         }
 
