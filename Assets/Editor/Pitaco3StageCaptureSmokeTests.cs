@@ -2,6 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using Assets._Game.Scripts.Core.Api.Dto;
+using Ibit.Plataform.Manager.Score;
 using Ibit.Core.Data;
 using Ibit.Core.Oximetry;
 using Ibit.Core.Oximetry.Integration;
@@ -88,8 +90,23 @@ public static class Pitaco3StageCaptureSmokeTests
             Check("legacy device omits the new optional arrays",
                 !JsonConvert.SerializeObject(source).Contains("\"bpmData\"") &&
                 !JsonConvert.SerializeObject(source).Contains("\"ppgRawData\""));
-            Check("remote upload is disabled until backend rollout",
-                !Ibit.Core.Data.Manager.DataManager.Pitaco3BackendReady);
+            Check("E2E test branch enables remote PITACO 3.0 uploads",
+                Ibit.Core.Data.Manager.DataManager.Pitaco3BackendReady);
+            var payload = new PlataformOverviewSendDto {
+                Result = GameResult.Success,
+                ClientRunId = firstRun,
+                FlowDataDevices = new List<FlowDataDevice> { snapshot }
+            };
+            var payloadJson = JsonConvert.SerializeObject(payload);
+            Check("backend accepts result as a string, not a numeric enum",
+                payloadJson.Contains("\\"result\\":\\"Success\\""));
+            Check("E2E payload retains all four arrays and clientRunId",
+                payloadJson.Contains("\\"clientRunId\\":\\"") &&
+                payloadJson.Contains("\\"ppgRawData\\":") &&
+                payloadJson.Contains("\\"spo2Data\\":") &&
+                payloadJson.Contains("\\"bpmData\\":") &&
+                payloadJson.Contains("\\"flowData\\":"));
+
 
             recorder.StartCapture();
             var second = recorder.BuildDeviceSnapshot(source);
