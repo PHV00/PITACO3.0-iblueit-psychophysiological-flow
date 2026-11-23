@@ -98,15 +98,17 @@ public static class Pitaco3StageCaptureSmokeTests
                 FlowDataDevices = new List<FlowDataDevice> { snapshot }
             };
             var payloadJson = JsonConvert.SerializeObject(payload);
+            var serializedStage = Newtonsoft.Json.Linq.JObject.Parse(payloadJson);
             Check("backend accepts result as a string, not a numeric enum",
-                payloadJson.Contains("\\"result\\":\\"Success\\""));
+                serializedStage["result"].Type == Newtonsoft.Json.Linq.JTokenType.String &&
+                serializedStage.Value<string>("result") == "Success");
+            var deviceJson = serializedStage["flowDataDevices"][0];
             Check("E2E payload retains all four arrays and clientRunId",
-                payloadJson.Contains("\\"clientRunId\\":\\"") &&
-                payloadJson.Contains("\\"ppgRawData\\":") &&
-                payloadJson.Contains("\\"spo2Data\\":") &&
-                payloadJson.Contains("\\"bpmData\\":") &&
-                payloadJson.Contains("\\"flowData\\":"));
-
+                serializedStage.Value<string>("clientRunId") == firstRun &&
+                deviceJson["flowData"] != null &&
+                deviceJson["bpmData"] != null &&
+                deviceJson["spo2Data"] != null &&
+                deviceJson["ppgRawData"] != null);
 
             recorder.StartCapture();
             var second = recorder.BuildDeviceSnapshot(source);
