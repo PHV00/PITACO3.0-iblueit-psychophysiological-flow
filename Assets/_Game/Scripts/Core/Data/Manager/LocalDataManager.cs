@@ -31,16 +31,6 @@ namespace Ibit.Core.Data.Manager
                     : Guid.NewGuid().ToString("N");
                 filename = $"info_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{runId}.json";
             }
-            if (type == "PlataformOverview")
-            {
-                // Distinct executions must not overwrite each other in one minute.
-                var dto = dataObj as PlataformOverviewSendDto;
-                Guid parsed;
-                var runId = dto != null && Guid.TryParse(dto.ClientRunId, out parsed)
-                    ? parsed.ToString("N")
-                    : Guid.NewGuid().ToString("N");
-                filename = $"info_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{runId}.json";
-            }
 
             if (type == "PlataformOverview")
                 path = $"{GameDataPaths.localDataPath}/Pacients/{pacientName.Replace(" ", "")}/PlataformsData";
@@ -80,6 +70,17 @@ namespace Ibit.Core.Data.Manager
         {
             var path = "";
             var filename = $"info_{DateTime.Now:dd-MM-yyyy_HH-mm}.json";
+            if (type == "PlataformOverview")
+            {
+                // Failed remote posts keep distinct stage backups, including
+                // multiple runs made within the same minute.
+                var dto = dataObj as PlataformOverviewSendDto;
+                Guid parsed;
+                var runId = dto != null && Guid.TryParse(dto.ClientRunId, out parsed)
+                    ? parsed.ToString("N")
+                    : Guid.NewGuid().ToString("N");
+                filename = $"info_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{runId}.json";
+            }
 
             if (type == "PlataformOverview")
                 path = $"{GameDataPaths.remoteDataPath}/Pacients/{pacientId}/PlataformsData";
