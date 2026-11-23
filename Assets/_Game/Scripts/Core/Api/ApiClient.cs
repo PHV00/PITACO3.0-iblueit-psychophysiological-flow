@@ -128,7 +128,9 @@ namespace Assets._Game.Scripts.Core.Api
         public async Task<ApiResponse<PlataformOverviewDto>> SavePlataformOverview(PlataformOverviewSendDto plataformOverview)
         {
             var requestUrl = $"{_baseUrl}/{PlataformsUrl}";
-
+            bool isPitaco3 = plataformOverview.FlowDataDevices != null &&
+                plataformOverview.FlowDataDevices.Exists(device =>
+                    device != null && device.DeviceName == "Pitaco 3.0");
             var jsonContent = JsonConvert.SerializeObject(plataformOverview);
             var contentString = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
@@ -138,21 +140,55 @@ namespace Assets._Game.Scripts.Core.Api
                 var request = new HttpRequestMessage(HttpMethod.Post, requestUrl);
                 request.Headers.Add("GameToken", _gameToken);
                 request.Content = contentString;
+                if (isPitaco3)
+                    Debug.Log("[PITACO3-E2E] POST " + requestUrl +
+                              " | run=" + plataformOverview.ClientRunId +
+                              " | bytes=" + Encoding.UTF8.GetByteCount(jsonContent));
                 response = await HTTP_CLIENT.SendAsync(request);
             }
-            catch (HttpRequestException httpRequestException)
+            catch (HttpRequestException ex)
             {
-                Debug.LogWarning($"No internet connection!. Error: {httpRequestException}");
+                if (isPitaco3) Debug.LogError("[PITACO3-E2E] POST NETWORK_ERROR: " + ex.Message);
+                else Debug.LogWarning("No internet connection! Error: " + ex.Message);
+                return new ApiResponse<PlataformOverviewDto>();
+            }
+            catch (TaskCanceledException ex)
+            {
+                if (isPitaco3) Debug.LogError("[PITACO3-E2E] POST TIMEOUT: " + ex.Message);
+                else Debug.LogWarning("POST timed out: " + ex.Message);
                 return new ApiResponse<PlataformOverviewDto>();
             }
 
+            var responseText = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
+            {
+                if (isPitaco3)
+                    Debug.LogError("[PITACO3-E2E] HTTP " + (int)response.StatusCode +
+                                   " | " + responseText.Substring(0, Math.Min(responseText.Length, 1200)));
                 return new ApiResponse<PlataformOverviewDto>();
+            }
 
-            var stringResponse = response.Content.ReadAsStringAsync().Result;
-            var apiResponse = JsonConvert.DeserializeObject<ApiResponse<PlataformOverviewDto>>(stringResponse);
-
-            return apiResponse;
+            try
+            {
+                var api = JsonConvert.DeserializeObject<ApiResponse<PlataformOverviewDto>>(responseText);
+                if (isPitaco3)
+                {
+                    if (api != null && api.Success)
+                        Debug.Log("[PITACO3-E2E] HTTP " + (int)response.StatusCode +
+                                  " | API success=true | run=" + plataformOverview.ClientRunId);
+                    else
+                        Debug.LogError("[PITACO3-E2E] HTTP " + (int)response.StatusCode +
+                                       " | API nao confirmou sucesso: " +
+                                       responseText.Substring(0, Math.Min(responseText.Length, 1200)));
+                }
+                return api ?? new ApiResponse<PlataformOverviewDto>();
+            }
+            catch (JsonException ex)
+            {
+                if (isPitaco3)
+                    Debug.LogError("[PITACO3-E2E] Resposta HTTP invalida: " + ex.Message);
+                return new ApiResponse<PlataformOverviewDto>();
+            }
         }
 
         public async Task<ApiResponse<List<PacientDto>>> GetPacients()
