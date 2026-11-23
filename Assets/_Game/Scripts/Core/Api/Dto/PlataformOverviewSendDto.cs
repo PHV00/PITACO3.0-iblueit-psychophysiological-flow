@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Ibit.Core.Data;
 using Ibit.Plataform.Manager.Score;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace Assets._Game.Scripts.Core.Api.Dto
 {
@@ -14,7 +15,9 @@ namespace Assets._Game.Scripts.Core.Api.Dto
         [JsonProperty("playStart")] public DateTime PlayStart { get; set; }
         [JsonProperty("playFinish")] public DateTime PlayFinish { get; set; }
         [JsonProperty("duration")] public float Duration { get; set; }
-        [JsonProperty("result")] public GameResult Result { get; set; }
+        [JsonProperty("result")]
+        [JsonConverter(typeof(StringEnumConverter))]
+        public GameResult Result { get; set; }
         [JsonProperty("stageId")] public int StageId { get; set; }
         [JsonProperty("phase")] public int Phase { get; set; }
         [JsonProperty("level")] public int Level { get; set; }
