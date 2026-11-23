@@ -230,7 +230,7 @@ namespace Ibit.Plataform.Logger
             {
                 if (isModernPitaco && _pitaco3Recorder != null)
                 {
-                    Debug.Log("PlatformLogger - Device: Pitaco 3.0 (local-only, backend pending).");
+                    Debug.Log("PlatformLogger - Device: Pitaco 3.0 (E2E API upload enabled in test branch).");
                     plataformOverviewSendDto.FlowDataDevices.Add(
                         _pitaco3Recorder.BuildDeviceSnapshot(
                             _pitacoLogger != null ? _pitacoLogger.flowDataDevice : null));
@@ -259,13 +259,32 @@ namespace Ibit.Plataform.Logger
             }
 
 
-            var plataformResponse = await DataManager.Instance.SavePlataformOverview(plataformOverviewSendDto);
-            bool pitaco3LocalOnly = plataformOverviewSendDto.FlowDataDevices.Exists(
+            bool hasPitaco3 = plataformOverviewSendDto.FlowDataDevices.Exists(
                 device => device.DeviceName == Pitaco3DataRecorder.DeviceName);
-            if (plataformResponse.ApiResponse == null && !pitaco3LocalOnly)
+            if (hasPitaco3)
+            {
+                var optical = plataformOverviewSendDto.FlowDataDevices.Find(
+                    device => device.DeviceName == Pitaco3DataRecorder.DeviceName);
+                Debug.Log("[PITACO3-E2E] STAGE_SNAPSHOT run=" + plataformOverviewSendDto.ClientRunId +
+                          " | flow=" + (optical.FlowData != null ? optical.FlowData.Count : 0) +
+                          " | bpm=" + (optical.BpmData != null ? optical.BpmData.Count : 0) +
+                          " | spo2=" + (optical.Spo2Data != null ? optical.Spo2Data.Count : 0) +
+                          " | raw=" + (optical.PpgRawData != null ? optical.PpgRawData.Count : 0));
+            }
+
+            var plataformResponse = await DataManager.Instance.SavePlataformOverview(plataformOverviewSendDto);
+            if (hasPitaco3)
+            {
+                if (plataformResponse.ApiResponse != null && plataformResponse.ApiResponse.Success)
+                    Debug.Log("[PITACO3-E2E] STAGE_REMOTE_OK run=" + plataformOverviewSendDto.ClientRunId);
+                else
+                {
+                    Debug.LogWarning("[PITACO3-E2E] STAGE_REMOTE_FAIL run=" + plataformOverviewSendDto.ClientRunId);
+                    SysMessage.Info("Dados salvos localmente, mas o envio do PITACO 3.0 nao foi confirmado.\nVerifique o Console e a conexao com a API.");
+                }
+            }
+            else if (plataformResponse.ApiResponse == null)
                 SysMessage.Info("Erro ao salvar dados da plataforma na nuvem!\n Os dados poderão ser enviados posteriormente.");
-            else if (pitaco3LocalOnly)
-                Debug.Log("[PITACO3-RECORD] JSON local e pendencia preparados; envio Atlas depende do backend.");
 
             GameObject.Find("Canvas").transform.Find("SavingBgPanel").gameObject.SetActive(false);
 
