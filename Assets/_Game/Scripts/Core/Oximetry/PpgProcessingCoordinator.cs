@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Ibit.Core.Serial;
 using UnityEngine;
 
@@ -117,6 +118,36 @@ namespace Ibit.Core.Oximetry
         private float nextCalculationTraceAt;
 
         private readonly PpgSampleBuffer buffer = new PpgSampleBuffer();
+
+        // HUD-only rolling averages. Independent of the estimator's 8s buffer,
+        // firmware G1 and the source-aware Bridge/Mixer contract.
+        // At most one approved reading per second is counted per metric;
+        // invalid estimates and visual-only holds never enter these queues.
+        private const float HudTrendWindowSeconds = 60f;
+        private const float HudTrendMinIntervalSeconds = 1f;
+        private struct HudTrendReading
+        {
+            public readonly float At;
+            public readonly double Value;
+
+            public HudTrendReading(float at, double value)
+            {
+                At = at;
+                Value = value;
+            }
+        }
+
+        private readonly Queue<HudTrendReading> bpmHudTrend =
+            new Queue<HudTrendReading>();
+        private readonly Queue<HudTrendReading> spo2HudTrend =
+            new Queue<HudTrendReading>();
+        private double bpmHudTrendSum;
+        private double spo2HudTrendSum;
+        private float lastBpmHudTrendAt = -1f;
+        private float lastSpo2HudTrendAt = -1f;
+        // Independent timing diagnostics, never an alternative G1/SQI gate.
+        private readonly PpgMonotonicClockAligner deviceClock =
+            new PpgMonotonicClockAligner();
         // Diagnostics only, never feeds any gate, measurement or game decision.
         private readonly PpgRawG1Probe rawG1Probe = new PpgRawG1Probe();
         public PpgRawG1Summary LastG1ShadowSummary { get; private set; }
@@ -160,6 +191,14 @@ namespace Ibit.Core.Oximetry
         // scene. Neither the HUD nor the Mixer should show it as fresh.
         private const int MaximumLivePublicationQueueLagMs = 2000;
         public int LastPublishedQueueLagMs { get; private set; }
+        // Estimated age of the ending FIFO-read sample at publication.
+        // NaN means alignment is not established; Bridge falls back to
+        // the existing conservative USB queue-age policy.
+        public float LastPublishedAlignedSampleAgeAtPublishSeconds { get; private set; }
+        public bool HasDeviceClockAlignment => deviceClock.HasAlignment;
+        private bool PublishedClockFresh =>
+            float.IsNaN(LastPublishedAlignedSampleAgeAtPublishSeconds) ||
+            LastPublishedAlignedSampleAgeAtPublishSeconds <= 2f;
         private double? lastHudApprovedBpm;
         private float lastHudApprovedBpmAt = -1f;
         private int consecutiveBpmRejections;
@@ -177,6 +216,17 @@ namespace Ibit.Core.Oximetry
         private int pendingShortContactGaps;
         private long toleratedShortContactGaps;
         private long confirmedContactLosses;
+
+        // Trace only: six preceding RAW observations + short invalid/recovery
+        // bursts. Independent of G1, the processing buffer and publication.
+        // Reference constants mirror the currently frozen PITACO firmware.
+        private const int OpticalTraceHistoryCount = 6;
+        private const int OpticalTraceRecoveryCount = 4;
+        private const int OpticalTraceContactMin = 5000;
+        private const int OpticalTraceClipStart = 262143 - 2048;
+        private readonly Queue<string> opticalRawHistory = new Queue<string>();
+        private int opticalInvalidRun;
+        private int opticalRecoveryRemaining;
 
         private Gate01State gate01State = Gate01State.Waiting;
         private bool gate01Received;
@@ -233,6 +283,7 @@ namespace Ibit.Core.Oximetry
             hudShortContactGapActive && consecutiveNoContactSamples < ContactLossConfirmationSamples &&
             OpticalContactConfirmed && Gate01Approved &&
             LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
+            PublishedClockFresh &&
             lastHudValidMeasurement != null && lastHudValidAt >= 0f &&
             Time.unscaledTime - lastHudValidAt <= HudShortContactHoldMaxAgeSeconds;
 
@@ -254,6 +305,7 @@ namespace Ibit.Core.Oximetry
             OpticalContactConfirmed && Gate01Approved &&
             lastHudApprovedBpm.HasValue &&
             LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
+            PublishedClockFresh &&
             LastMeasurement != null && !LastMeasurement.BpmEstimate.HasValue &&
             lastHudApprovedBpmAt >= 0f &&
             Time.unscaledTime - lastHudApprovedBpmAt <= HudBpmHoldMaxAgeSeconds;
@@ -266,6 +318,7 @@ namespace Ibit.Core.Oximetry
             Gate01Approved && OpticalContactConfirmed &&
             LastMeasurement != null &&
             LastPublishedQueueLagMs <= MaximumLivePublicationQueueLagMs &&
+            PublishedClockFresh &&
             (LastMeasurement.BpmEstimate.HasValue ||
              LastMeasurement.SpO2DemoPercent.HasValue) &&
             lastHudValidAt >= 0f &&
@@ -277,12 +330,88 @@ namespace Ibit.Core.Oximetry
         public long JsonCallbacksReceived => jsonCallbacksReceived;
         public long ReceivedSampleFrames => receivedSampleFrames;
         public event Action<PpgMeasurement> OnMeasurement;
+
+        // Display-only aggregates for the latest <=60 seconds, not a new
+        // physiological measurement. Each metric uses only its own approved
+        // publications; skipped/blocked seconds are not filled in.
+        public void GetHudTrend60Seconds(out double? bpmMean, out int bpmCount,
+            out double? spo2DemoMean, out int spo2Count)
+        {
+            PruneHudTrend(Time.unscaledTime);
+            bpmCount = bpmHudTrend.Count;
+            spo2Count = spo2HudTrend.Count;
+            bpmMean = bpmCount > 0
+                ? (double?)(bpmHudTrendSum / bpmCount) : null;
+            spo2DemoMean = spo2Count > 0
+                ? (double?)(spo2HudTrendSum / spo2Count) : null;
+        }
+
+        private void RecordHudTrend(PpgMeasurement measurement)
+        {
+            // Must not turn a queued/stale or rejected publication into a
+            // seemingly stable 60s result. No history enters the game agent.
+            if (measurement == null || !OpticalContactConfirmed ||
+                !Gate01Approved ||
+                LastPublishedQueueLagMs > MaximumLivePublicationQueueLagMs ||
+                !PublishedClockFresh)
+                return;
+
+            float now = Time.unscaledTime;
+            PruneHudTrend(now);
+            if (measurement.BpmEstimate.HasValue &&
+                !double.IsNaN(measurement.BpmEstimate.Value) &&
+                !double.IsInfinity(measurement.BpmEstimate.Value) &&
+                measurement.BpmEstimate.Value > 0 &&
+                (lastBpmHudTrendAt < 0f ||
+                 now - lastBpmHudTrendAt >= HudTrendMinIntervalSeconds))
+            {
+                bpmHudTrend.Enqueue(new HudTrendReading(
+                    now, measurement.BpmEstimate.Value));
+                bpmHudTrendSum += measurement.BpmEstimate.Value;
+                lastBpmHudTrendAt = now;
+            }
+            if (measurement.SpO2DemoPercent.HasValue &&
+                !double.IsNaN(measurement.SpO2DemoPercent.Value) &&
+                !double.IsInfinity(measurement.SpO2DemoPercent.Value) &&
+                measurement.SpO2DemoPercent.Value > 0 &&
+                measurement.SpO2DemoPercent.Value <= 100 &&
+                (lastSpo2HudTrendAt < 0f ||
+                 now - lastSpo2HudTrendAt >= HudTrendMinIntervalSeconds))
+            {
+                spo2HudTrend.Enqueue(new HudTrendReading(
+                    now, measurement.SpO2DemoPercent.Value));
+                spo2HudTrendSum += measurement.SpO2DemoPercent.Value;
+                lastSpo2HudTrendAt = now;
+            }
+        }
+
+        private void PruneHudTrend(float now)
+        {
+            while (bpmHudTrend.Count > 0 &&
+                   now - bpmHudTrend.Peek().At > HudTrendWindowSeconds)
+                bpmHudTrendSum -= bpmHudTrend.Dequeue().Value;
+            while (spo2HudTrend.Count > 0 &&
+                   now - spo2HudTrend.Peek().At > HudTrendWindowSeconds)
+                spo2HudTrendSum -= spo2HudTrend.Dequeue().Value;
+        }
+
+        private void ClearHudTrend()
+        {
+            bpmHudTrend.Clear();
+            spo2HudTrend.Clear();
+            bpmHudTrendSum = 0;
+            spo2HudTrendSum = 0;
+            lastBpmHudTrendAt = -1f;
+            lastSpo2HudTrendAt = -1f;
+        }
         // Independent of 8-second processing: one contact observation per
         // sample. A missing sqi object is NOT treated as proof of finger-off.
         public event Action<bool> OnOpticalContactSample;
 
         private void OnEnable()
         {
+            deviceClock.Clear();
+            ClearOpticalTrace();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("Aguardando amostras RED/IR");
@@ -367,7 +496,16 @@ namespace Ibit.Core.Oximetry
                     " | bpmPublished=" + bpmLivePublications +
                     " | red057DiagnosticPass=" + bpmRedDiagnostic057Passes +
                     " | bpmVisualHoldDecisions=" + bpmVisualHoldDecisions +
-                    " | publishQueueLagMs=" + LastPublishedQueueLagMs);
+                    " | publishQueueLagMs=" + LastPublishedQueueLagMs +
+                    " | clockReady=" + deviceClock.HasAlignment +
+                    " | clockOffsetMs=" + deviceClock.OffsetMilliseconds.ToString("F1") +
+                    " | ingressExcessMs=" + deviceClock.LastExcessArrivalDelayMilliseconds.ToString("F1") +
+                    " | alignedPublishAgeMs=" +
+                        (float.IsNaN(LastPublishedAlignedSampleAgeAtPublishSeconds)
+                            ? "--" : (LastPublishedAlignedSampleAgeAtPublishSeconds * 1000f).ToString("F1")) +
+                    " | clockRestarts=" + deviceClock.DeviceRestarts +
+                    " | clockWraps=" + deviceClock.DeviceWraps +
+                    " | clockSampleGaps=" + deviceClock.AcquisitionGaps);
             }
         }
 
@@ -389,6 +527,8 @@ namespace Ibit.Core.Oximetry
 
         private void OnDisable()
         {
+            deviceClock.Clear();
+            ClearOpticalTrace();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             if (serialController != null)
@@ -401,6 +541,8 @@ namespace Ibit.Core.Oximetry
 
         private void OnDeviceDisconnected()
         {
+            deviceClock.Clear();
+            ClearOpticalTrace();
             rawG1Probe.Clear();
             LastG1ShadowSummary = null;
             ResetMeasurements("PITACO 2.4 desconectado");
@@ -410,6 +552,71 @@ namespace Ibit.Core.Oximetry
         {
             Debug.Log("[PPG-DIAG] t=" + Time.unscaledTime.ToString("F2") +
                 " | event=" + eventName + " | " + detail);
+        }
+
+        private void ClearOpticalTrace()
+        {
+            opticalRawHistory.Clear();
+            opticalInvalidRun = 0;
+            opticalRecoveryRemaining = 0;
+        }
+
+        // The firmware's contact flag can be false even when both channels
+        // currently exceed 5000: it needs three good samples to re-confirm.
+        // These observations explain WHY a flag changed without weakening it.
+        private void TraceOpticalRaw(SampleFrame frame)
+        {
+            bool contact = frame.sqi.contact;
+            int red = frame.ppg.red;
+            int ir = frame.ppg.ir;
+            string rawStatus = "redBelow5000=" + (red < OpticalTraceContactMin) +
+                " | irBelow5000=" + (ir < OpticalTraceContactMin) +
+                " | redNearClip=" + (red >= OpticalTraceClipStart) +
+                " | irNearClip=" + (ir >= OpticalTraceClipStart);
+            string detail = "seq=" + frame.seq + " | devMs=" + frame.t_ms +
+                " | red=" + red + " | ir=" + ir +
+                " | fwContact=" + contact + " | fwReason=" + frame.sqi.reason +
+                " | " + rawStatus +
+                " | unityConfirmedContact=" + OpticalContactConfirmed +
+                " | g1=" + gate01State +
+                " | serialQueueLagMs=" +
+                (PitacoConnectionManager.Active != null
+                    ? PitacoConnectionManager.Active.CurrentDispatchQueueLagMs : 0);
+            if (!contact)
+            {
+                if (opticalInvalidRun == 0)
+                {
+                    Trace("OPTICAL_EDGE", "transition=TO_INVALID | " + detail +
+                        " | precedingRaw=[ " +
+                        string.Join("; ", opticalRawHistory.ToArray()) + " ]");
+                }
+                ++opticalInvalidRun;
+                opticalRecoveryRemaining = 0;
+                // First three failures show the confirmation sequence; sustained
+                // finger-off is sampled every ~5 s, not logged at 25 Hz.
+                if (opticalInvalidRun <= 3 || opticalInvalidRun % 125 == 0)
+                    Trace("OPTICAL_SAMPLE", "phase=INVALID | badRun=" +
+                        opticalInvalidRun + " | " + detail);
+            }
+            else if (opticalInvalidRun > 0)
+            {
+                Trace("OPTICAL_EDGE", "transition=TO_VALID | previousBadRun=" +
+                    opticalInvalidRun + " | " + detail);
+                opticalInvalidRun = 0;
+                opticalRecoveryRemaining = OpticalTraceRecoveryCount;
+            }
+            else if (opticalRecoveryRemaining > 0)
+            {
+                Trace("OPTICAL_SAMPLE", "phase=RECOVERY | remaining=" +
+                    opticalRecoveryRemaining + " | " + detail);
+                --opticalRecoveryRemaining;
+            }
+
+            opticalRawHistory.Enqueue("seq=" + frame.seq +
+                ",devMs=" + frame.t_ms + ",red=" + red + ",ir=" + ir +
+                ",contact=" + contact + ",reason=" + frame.sqi.reason);
+            if (opticalRawHistory.Count > OpticalTraceHistoryCount)
+                opticalRawHistory.Dequeue();
         }
 
         // Every new outcome is logged immediately; repeated identical outcomes
@@ -462,6 +669,7 @@ namespace Ibit.Core.Oximetry
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
             LastPublishedQueueLagMs = 0;
+            LastPublishedAlignedSampleAgeAtPublishSeconds = float.NaN;
         }
 
         private void SuspendPpgPublication(string status)
@@ -474,6 +682,7 @@ namespace Ibit.Core.Oximetry
             ResetBpmHudHold();
             hasPreviousProcessingTime = false;
             LastMeasurement = new PpgMeasurement(0, 0, null, null, null, 0, status);
+            LastPublishedAlignedSampleAgeAtPublishSeconds = float.NaN;
             Trace("WINDOW_SUSPEND", "reason=" + status +
                 " | samplesRetained=" + retained +
                 " | publicationValid=false | contact=" + OpticalContactConfirmed +
@@ -493,6 +702,9 @@ namespace Ibit.Core.Oximetry
 
         private void ResetMeasurements(string status)
         {
+            // Different contact, device epoch or telemetry session: do not
+            // mix their readings in a single rolling HUD statistic.
+            ClearHudTrend();
             InvalidatePpgWindow(status);
             OpticalContactConfirmed = false;
             consecutiveNoContactSamples = 0;
@@ -700,6 +912,49 @@ namespace Ibit.Core.Oximetry
                 return;
             }
 
+            // Bounded optical diagnostics capture failures even when Unity
+            // subsequently quarantines the sample or resets the 8s buffer.
+            TraceOpticalRaw(frame);
+
+            // The worker stamps the complete USB line BEFORE Unity's queue.
+            // Align against firmware t_ms/seq without moving any G1 logic.
+            var serialManager = PitacoConnectionManager.Active;
+            if (serialManager != null &&
+                serialManager.ConnectedVersion == PitacoConnectionManager.Version.Pitaco24 &&
+                serialManager.CurrentDispatchArrivalTicks > 0 &&
+                frame.seq >= 0 && frame.seq <= ushort.MaxValue &&
+                frame.t_ms >= 0 && frame.t_ms <= uint.MaxValue)
+            {
+                PpgClockObservation observation = deviceClock.Observe(
+                    (ushort)frame.seq, (uint)frame.t_ms,
+                    PpgMonotonicClockAligner.HostTimestampMilliseconds(
+                        serialManager.CurrentDispatchArrivalTicks));
+                if (observation == PpgClockObservation.DeviceRestart)
+                {
+                    Trace("CLOCK_EPOCH_RESET", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | resets=" + deviceClock.DeviceRestarts +
+                        " | action=G1_AND_BUFFER_RESET");
+                    // Never reuse G1 approval or diagnostic raw history
+                    // from the old epoch after a suspected device restart.
+                    rawG1Probe.Clear();
+                    LastG1ShadowSummary = null;
+                    ClearOpticalTrace();
+                    ResetMeasurements("PITACO: relogio/sequencia reiniciados");
+                    lastSampleReceivedAt = Time.unscaledTime;
+                    lastObservedDeviceMs = (uint)frame.t_ms;
+                    hasObservedDeviceMs = true;
+                }
+                else if (observation == PpgClockObservation.DeviceWrap)
+                    Trace("CLOCK_DEVICE_WRAP", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | wraps=" + deviceClock.DeviceWraps);
+                else if (observation == PpgClockObservation.AcquisitionGap)
+                    Trace("CLOCK_SAMPLE_GAP", "seq=" + frame.seq +
+                        " | devMs=" + frame.t_ms +
+                        " | action=DIAGNOSTIC_ONLY");
+            }
+
             bool hasContact = frame.sqi.contact;
             // Keep the finger-placement monitor's existing timing unchanged.
             OnOpticalContactSample?.Invoke(hasContact);
@@ -809,6 +1064,7 @@ namespace Ibit.Core.Oximetry
             bool continuous = buffer.Add(sample);
             if (!continuous)
             {
+                ClearHudTrend();
                 Trace("SEQUENCE_RESET", "seq=" + sample.Sequence +
                     " | devMs=" + sample.TimeMs +
                     " | bufferNow=" + buffer.Count);
@@ -980,6 +1236,12 @@ namespace Ibit.Core.Oximetry
             LastPublishedQueueLagMs = PitacoConnectionManager.Active != null
                 ? Math.Max(0, PitacoConnectionManager.Active.CurrentDispatchQueueLagMs)
                 : 0;
+            double alignedMs = deviceClock.EstimateLatestSampleAgeMilliseconds(
+                PpgMonotonicClockAligner.HostNowMilliseconds());
+            LastPublishedAlignedSampleAgeAtPublishSeconds =
+                double.IsNaN(alignedMs) || double.IsInfinity(alignedMs)
+                    ? float.NaN : (float)(alignedMs / 1000.0);
+            RecordHudTrend(LastMeasurement);
             OnMeasurement?.Invoke(LastMeasurement);
 
 
